@@ -1,0 +1,54 @@
+version: "3"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  init:
+    desc: Install dependencies and create the virtual environment
+    cmds:
+      - uv sync
+      - echo "Created virtual environment"
+
+  train:
+    desc: "Train the PPO policy; pass args with: task train -- --workers 4"
+    cmds:
+      - uv run python scripts/train.py {{.CLI_ARGS}}
+
+  play:
+    desc: "Run a trained policy and show animation; pass args with: task play -- --checkpoint checkpoints/latest.pt"
+    cmds:
+      - uv run python scripts/play.py {{.CLI_ARGS}}
+
+  test:
+    desc: Run the test suite with coverage
+    cmds:
+      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --no-cov-on-fail
+
+  format:
+    desc: Format, lint, and type-check the code
+    cmds:
+      - uv run ruff format
+      - uv run ruff check --fix
+      - uv run mypy n_cartpole/ tests/ scripts/ --ignore-missing-imports
+
+  ci:
+    desc: Run the full CI suite locally (format + test)
+    cmds:
+      - task: format
+      - task: test
+
+  clean:
+    desc: Remove the virtual environment, caches, build artifacts, and checkpoints
+    cmds:
+      - rm -rf .venv
+      - rm -rf .mypy_cache
+      - rm -rf .pytest_cache
+      - rm -rf .ruff_cache
+      - rm -rf build/
+      - rm -rf dist/
+      - rm -rf checkpoints/
+      - find . -name ".coverage*" -delete
+      - find . -name "__pycache__" -exec rm -r {} +
