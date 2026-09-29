@@ -18,6 +18,13 @@ def parse_args() -> argparse.Namespace:
         description="Train a PPO policy for double pendulum cartpole swing-up."
     )
     parser.add_argument(
+        "--links",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="Number of pendulum links: 1 (single, warm-up) or 2 (double).",
+    )
+    parser.add_argument(
         "--workers", type=int, default=None, help="Number of rollout workers"
     )
     parser.add_argument(
@@ -59,7 +66,7 @@ def main() -> None:
     args = parse_args()
 
     cfg = TrainingConfig(
-        env=EnvConfig(physics=PhysicsParams()),
+        env=EnvConfig(physics=PhysicsParams(), n_links=args.links),
         device=args.device,
         steps_per_worker=args.steps,
         hidden=args.hidden,

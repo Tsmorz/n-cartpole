@@ -63,10 +63,11 @@ class Actor(nn.Module):
     OBS_DIM = 8
     ACT_DIM = 1
 
-    def __init__(self, hidden: int = 64) -> None:
-        """Initialize Actor with given hidden layer size."""
+    def __init__(self, hidden: int = 64, obs_dim: int | None = None) -> None:
+        """Initialize Actor with given hidden layer size and observation width."""
         super().__init__()
-        self.net = _mlp(self.OBS_DIM, hidden, self.ACT_DIM)
+        self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
+        self.net = _mlp(self.obs_dim, hidden, self.ACT_DIM)
         self.log_std = nn.Parameter(torch.zeros(self.ACT_DIM))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -123,10 +124,11 @@ class Critic(nn.Module):
 
     OBS_DIM = 8
 
-    def __init__(self, hidden: int = 64) -> None:
-        """Initialize Critic with given hidden layer size."""
+    def __init__(self, hidden: int = 64, obs_dim: int | None = None) -> None:
+        """Initialize Critic with given hidden layer size and observation width."""
         super().__init__()
-        self.net = _mlp(self.OBS_DIM, hidden, 1)
+        self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
+        self.net = _mlp(self.obs_dim, hidden, 1)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Return value estimates with shape (batch,)."""

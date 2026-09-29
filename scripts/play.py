@@ -6,12 +6,14 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
 import torch
 from loguru import logger
 
-from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
+from n_cartpole.env.double_cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
+from n_cartpole.env.factory import env_spec, make_env
 from n_cartpole.policy.actor_critic import Actor, RunningNorm
 from n_cartpole.policy.tqc import SquashedGaussianActor
 from n_cartpole.viz.animate import animate_episode
@@ -47,7 +49,7 @@ def parse_args() -> argparse.Namespace:
 def run_episode(
     select_action: Callable[[torch.Tensor], np.ndarray],
     norm: RunningNorm,
-    env: DoublePendulumCartpole,
+    env: gym.Env,
     device: torch.device,
     seed: int | None = None,
 ) -> tuple[np.ndarray, float]:
@@ -83,7 +85,10 @@ def main() -> None:
     algo = ckpt.get("algo", "ppo")
     device = torch.device("cpu")
 
-    norm = RunningNorm(8)
+    n_links = getattr(cfg.env, "n_links", 2) if cfg is not None else 2
+    obs_dim, _ = env_spec(n_links)
+
+    norm = RunningNorm(obs_dim)
     norm.load_state_dict(ckpt["norm"])
 
     if algo == "tqc":
@@ -94,7 +99,7 @@ def main() -> None:
         def select_action(obs_norm: torch.Tensor) -> np.ndarray:
             return actor.act(obs_norm, deterministic=True).squeeze(0).cpu().numpy()
     else:
-        ppo_actor = Actor(hidden=hidden)
+        ppo_actor = Actor(hidden=hidden, obs_dim=obs_dim)
         ppo_actor.load_state_dict(ckpt["actor"])
         ppo_actor.eval()
 
@@ -102,8 +107,8 @@ def main() -> None:
             mean, _ = ppo_actor(obs_norm)  # deterministic: use the mean
             return mean.squeeze(0).cpu().numpy()
 
-    logger.info(f"Loaded {algo.upper()} policy from {args.checkpoint}")
-    env = DoublePendulumCartpole(EnvConfig(physics=physics))
+    logger.info(f"Loaded {algo.upper()} policy from {args.checkpoint} ({n_links}-link)")
+    env = make_env(EnvConfig(physics=physics, n_links=n_links))
 
     for ep in range(args.episodes):
         seed = args.seed + ep

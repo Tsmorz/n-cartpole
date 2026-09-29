@@ -17,7 +17,8 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
+from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.factory import make_env
 from n_cartpole.policy.actor_critic import Actor, Critic
 
 
@@ -25,7 +26,7 @@ from n_cartpole.policy.actor_critic import Actor, Critic
 class RolloutResult:
     """Collected trajectory from one worker."""
 
-    obs: np.ndarray  # (T, 8)
+    obs: np.ndarray  # (T, obs_dim)
     actions: np.ndarray  # (T, 1)
     log_probs: np.ndarray  # (T,)
     rewards: np.ndarray  # (T,)
@@ -42,6 +43,7 @@ def rollout_worker(
     env_config: EnvConfig,
     n_steps: int,
     hidden: int,
+    obs_dim: int = 8,
 ) -> None:
     """Worker process: collect rollouts and send results back.
 
@@ -49,11 +51,11 @@ def rollout_worker(
     broadcast by the main process each iteration.
     """
     device = torch.device("cpu")
-    env = DoublePendulumCartpole(env_config)
-    actor = Actor(hidden=hidden).to(device)
-    critic = Critic(hidden=hidden).to(device)
+    env = make_env(env_config)
+    actor = Actor(hidden=hidden, obs_dim=obs_dim).to(device)
+    critic = Critic(hidden=hidden, obs_dim=obs_dim).to(device)
 
-    obs_arr = np.zeros((n_steps, 8), dtype=np.float32)
+    obs_arr = np.zeros((n_steps, obs_dim), dtype=np.float32)
     act_arr = np.zeros((n_steps, 1), dtype=np.float32)
     lp_arr = np.zeros(n_steps, dtype=np.float32)
     rew_arr = np.zeros(n_steps, dtype=np.float32)

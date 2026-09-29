@@ -17,6 +17,9 @@ class EnvConfig:
     """Configuration for the double cartpole environment."""
 
     physics: PhysicsParams = field(default_factory=PhysicsParams)
+    # Number of pendulum links: 1 (single) or 2 (double). Selects the env/dynamics
+    # via ``n_cartpole.env.factory.make_env`` and the observation width.
+    n_links: int = 2
     max_steps: int = 1000
     # Small perturbation around the hanging-down start (the swing-up task).
     init_noise: float = 0.05
@@ -76,6 +79,9 @@ class DoublePendulumCartpole(gym.Env):
     """
 
     metadata: ClassVar[dict] = {"render_modes": ["rgb_array"]}  # type: ignore[misc]
+
+    OBS_DIM: ClassVar[int] = 8
+    N_LINKS: ClassVar[int] = 2
 
     def __init__(self, config: EnvConfig | None = None) -> None:
         """Initialize the environment."""
@@ -166,10 +172,12 @@ class DoublePendulumCartpole(gym.Env):
         r_angle = (0.5 + 0.5 * np.cos(th1)) * (0.5 + 0.5 * np.cos(th2))
         # Cart centered on the rail (x normalized by the rail half-length).
         r_pos = 0.5 + 0.5 * np.exp(-0.7 * (x / p.x_lim) ** 2)
-        # Low angular velocity — encourages balancing, not spinning through upright.
-        r_vel = (0.5 + 0.5 * np.exp(-0.1 * th1d**2)) * (
-            0.5 + 0.5 * np.exp(-0.1 * th2d**2)
-        )
+        # Velocity penalty GATED by upright alignment: spinning is free during
+        # swing-up (r_angle≈0) and penalized only near the top (r_angle≈1), so the
+        # reward rewards *balancing* without fighting the energy pumping needed to
+        # get both links up. Bounded to [0.5, 1].
+        vel_pen = np.exp(-0.1 * (th1d**2 + th2d**2))
+        r_vel = 1.0 - 0.5 * r_angle * (1.0 - vel_pen)
         # Mild energy/effort term on the normalized force.
         a = F / p.force_max
         r_act = 0.8 + 0.2 * max(1.0 - a**2, 0.0)

@@ -2,22 +2,27 @@
 
 from __future__ import annotations
 
+import csv
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.multiprocessing as mp
 from loguru import logger
 from tqdm import tqdm
 
-from n_cartpole.env.double_cartpole import OBS_MIRROR_SIGN, EnvConfig
+from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.factory import env_spec
 from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
 from n_cartpole.policy.ppo import Batch, compute_gae, ppo_update
 from n_cartpole.training.rollout import RolloutResult, rollout_worker
 
 
-def _augment_symmetry(batch: Batch, device: torch.device) -> Batch:
+def _augment_symmetry(
+    batch: Batch, device: torch.device, mirror_sign: np.ndarray
+) -> Batch:
     """Double the batch with left-right mirrored transitions.
 
     The cart-pole is mirror-symmetric: mirroring the observation and negating the
@@ -26,7 +31,7 @@ def _augment_symmetry(batch: Batch, device: torch.device) -> Batch:
     reuse those quantities for the mirrored half; training on both halves teaches
     the policy/value nets to respect the symmetry and roughly doubles sample count.
     """
-    sign = torch.as_tensor(OBS_MIRROR_SIGN, device=device)
+    sign = torch.as_tensor(mirror_sign, device=device)
     return Batch(
         obs=torch.cat([batch["obs"], batch["obs"] * sign]),
         actions=torch.cat([batch["actions"], -batch["actions"]]),
@@ -93,8 +98,10 @@ class TrainingConfig:
     lam: float = 0.95
     clip_eps: float = 0.2
     value_clip_eps: float = 0.2
-    entropy_coeff_start: float = 0.01
-    entropy_coeff_end: float = 0.001
+    # Anneal entropy to 0: a persistent entropy bonus was inflating log_std once
+    # advantages shrank, collapsing the converged policy. Start modest, end off.
+    entropy_coeff_start: float = 0.005
+    entropy_coeff_end: float = 0.0
     n_epochs: int = 10
     lr: float = 3e-4
     max_grad_norm: float = 0.5
@@ -172,9 +179,16 @@ class Trainer:
         self.device = _resolve_device(self.cfg.device)
         logger.info(f"Training device: {self.device} (requested: {self.cfg.device})")
 
-        self.actor = Actor(hidden=self.cfg.hidden).to(self.device)
-        self.critic = Critic(hidden=self.cfg.hidden).to(self.device)
-        self.norm = RunningNorm(Actor.OBS_DIM).to(self.device)
+        self.obs_dim, self.mirror_sign = env_spec(self.cfg.env.n_links)
+        logger.info(f"Links: {self.cfg.env.n_links} | observation dim: {self.obs_dim}")
+        # Per-iteration mean episode return, for the training curve.
+        self.return_history: list[float] = []
+
+        self.actor = Actor(hidden=self.cfg.hidden, obs_dim=self.obs_dim).to(self.device)
+        self.critic = Critic(hidden=self.cfg.hidden, obs_dim=self.obs_dim).to(
+            self.device
+        )
+        self.norm = RunningNorm(self.obs_dim).to(self.device)
         # Running mean/std of returns; used to scale the value loss & clip so a
         # fixed value_clip_eps stays meaningful when returns are large.
         self.ret_norm = RunningNorm(1).to(self.device)
@@ -211,6 +225,16 @@ class Trainer:
         )
         logger.info(f"Saved checkpoint → {path}")
 
+    def save_return_history(self, path: Path) -> None:
+        """Write per-iteration mean episode return to a CSV (for plotting)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["iteration", "mean_return"])
+            for i, ret in enumerate(self.return_history, start=1):
+                writer.writerow([i, ret])
+        logger.info(f"Saved return history → {path}")
+
     def load(self, path: Path) -> None:
         """Load checkpoint."""
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -240,6 +264,7 @@ class Trainer:
                     cfg.env,
                     cfg.steps_per_worker,
                     cfg.hidden,
+                    self.obs_dim,
                 ),
                 daemon=True,
             )
@@ -300,7 +325,7 @@ class Trainer:
                     target_kl = None
 
                 if cfg.symmetry_augment:
-                    batch = _augment_symmetry(batch, self.device)
+                    batch = _augment_symmetry(batch, self.device, self.mirror_sign)
 
                 n_total = cfg.n_workers * cfg.steps_per_worker
                 n_mini = max(1, min(cfg.mini_batch_size, n_total))
@@ -320,6 +345,7 @@ class Trainer:
                 )
 
                 mean_return = sum(r.episode_return for r in results) / len(results)
+                self.return_history.append(mean_return)
                 pbar.set_postfix(
                     ret=f"{mean_return:.1f}",
                     π=f"{metrics['policy_loss']:.4f}",
@@ -349,6 +375,7 @@ class Trainer:
             for p in procs:
                 p.join(timeout=5)
             self.save(cfg.checkpoint_dir / "latest.pt")
+            self.save_return_history(cfg.checkpoint_dir / "returns.csv")
 
         if interrupted:
             logger.info("Resume with: task train -- --resume checkpoints/latest.pt")
