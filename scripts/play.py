@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,7 @@ from loguru import logger
 from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
 from n_cartpole.policy.actor_critic import Actor, RunningNorm
+from n_cartpole.policy.tqc import SquashedGaussianActor
 from n_cartpole.viz.animate import animate_episode
 
 
@@ -43,25 +45,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_episode(
-    actor: Actor,
+    select_action: Callable[[torch.Tensor], np.ndarray],
     norm: RunningNorm,
     env: DoublePendulumCartpole,
+    device: torch.device,
     seed: int | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Roll out one episode and return states + total reward."""
+    """Roll out one deterministic episode and return states + total reward."""
     obs, _ = env.reset(seed=seed)
     states = [env.get_state()]
     total_reward = 0.0
-    device = next(actor.parameters()).device
 
     with torch.no_grad():
         terminated = truncated = False
         while not (terminated or truncated):
             obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
             obs_norm = norm.normalize(obs_t)
-            mean, log_std = actor(obs_norm)
-            action = mean.cpu().numpy()  # use mean (no exploration) for eval
-            obs, reward, terminated, truncated, _ = env.step(action[0])
+            action = select_action(obs_norm)
+            obs, reward, terminated, truncated, _ = env.step(action)
             states.append(env.get_state())
             total_reward += reward
 
@@ -79,18 +80,34 @@ def main() -> None:
     cfg = ckpt.get("cfg")
     hidden = cfg.hidden if cfg is not None else 64
     physics = cfg.env.physics if cfg is not None else PhysicsParams()
+    algo = ckpt.get("algo", "ppo")
+    device = torch.device("cpu")
 
-    actor = Actor(hidden=hidden)
-    norm = RunningNorm(Actor.OBS_DIM)
-    actor.load_state_dict(ckpt["actor"])
+    norm = RunningNorm(8)
     norm.load_state_dict(ckpt["norm"])
-    actor.eval()
 
+    if algo == "tqc":
+        actor = SquashedGaussianActor(hidden=hidden, force_max=physics.force_max)
+        actor.load_state_dict(ckpt["actor"])
+        actor.eval()
+
+        def select_action(obs_norm: torch.Tensor) -> np.ndarray:
+            return actor.act(obs_norm, deterministic=True).squeeze(0).cpu().numpy()
+    else:
+        ppo_actor = Actor(hidden=hidden)
+        ppo_actor.load_state_dict(ckpt["actor"])
+        ppo_actor.eval()
+
+        def select_action(obs_norm: torch.Tensor) -> np.ndarray:
+            mean, _ = ppo_actor(obs_norm)  # deterministic: use the mean
+            return mean.squeeze(0).cpu().numpy()
+
+    logger.info(f"Loaded {algo.upper()} policy from {args.checkpoint}")
     env = DoublePendulumCartpole(EnvConfig(physics=physics))
 
     for ep in range(args.episodes):
         seed = args.seed + ep
-        states, total_reward = run_episode(actor, norm, env, seed=seed)
+        states, total_reward = run_episode(select_action, norm, env, device, seed=seed)
         logger.info(
             f"Episode {ep + 1}: {len(states)} steps, total reward = {total_reward:.2f}"
         )

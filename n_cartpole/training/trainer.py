@@ -11,10 +11,30 @@ import torch.multiprocessing as mp
 from loguru import logger
 from tqdm import tqdm
 
-from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.double_cartpole import OBS_MIRROR_SIGN, EnvConfig
 from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
 from n_cartpole.policy.ppo import Batch, compute_gae, ppo_update
 from n_cartpole.training.rollout import RolloutResult, rollout_worker
+
+
+def _augment_symmetry(batch: Batch, device: torch.device) -> Batch:
+    """Double the batch with left-right mirrored transitions.
+
+    The cart-pole is mirror-symmetric: mirroring the observation and negating the
+    action gives a physically valid transition with the SAME reward, and therefore
+    the same advantage, return, value and (for a symmetric policy) log-prob. We
+    reuse those quantities for the mirrored half; training on both halves teaches
+    the policy/value nets to respect the symmetry and roughly doubles sample count.
+    """
+    sign = torch.as_tensor(OBS_MIRROR_SIGN, device=device)
+    return Batch(
+        obs=torch.cat([batch["obs"], batch["obs"] * sign]),
+        actions=torch.cat([batch["actions"], -batch["actions"]]),
+        log_probs=torch.cat([batch["log_probs"], batch["log_probs"]]),
+        advantages=torch.cat([batch["advantages"], batch["advantages"]]),
+        returns=torch.cat([batch["returns"], batch["returns"]]),
+        values=torch.cat([batch["values"], batch["values"]]),
+    )
 
 
 def _resolve_device(pref: str) -> torch.device:
@@ -66,7 +86,7 @@ class TrainingConfig:
         default_factory=lambda: max(1, min(8, (os.cpu_count() or 2) - 2))
     )
     steps_per_worker: int = 2048
-    hidden: int = 64
+    hidden: int = 128
 
     # PPO
     gamma: float = 0.99
@@ -81,6 +101,17 @@ class TrainingConfig:
     # Fixed minibatch size for the PPO update. 512 gives many gradient steps per
     # rollout (good sample efficiency) while staying cheap on CPU.
     mini_batch_size: int = 512
+    # Scale the value loss/clip by the running return std so value_clip_eps stays
+    # meaningful when returns are large. When True, target_kl also applies.
+    normalize_returns: bool = True
+    # Augment each PPO batch with left-right mirrored transitions (the cart-pole
+    # is mirror-symmetric). ~Free 2x data and enforces a symmetric policy — the
+    # "virtual experience replay" idea from Lee et al., adapted to on-policy PPO.
+    symmetry_augment: bool = True
+    # Early-stop the PPO epoch loop once mean KL exceeds this, bounding how far
+    # the policy moves per rollout (prevents over-updating now that the value
+    # loss is properly scaled and no longer suppresses actor gradients).
+    target_kl: float = 0.03
 
     # Training loop
     n_iterations: int = 300
@@ -144,6 +175,9 @@ class Trainer:
         self.actor = Actor(hidden=self.cfg.hidden).to(self.device)
         self.critic = Critic(hidden=self.cfg.hidden).to(self.device)
         self.norm = RunningNorm(Actor.OBS_DIM).to(self.device)
+        # Running mean/std of returns; used to scale the value loss & clip so a
+        # fixed value_clip_eps stays meaningful when returns are large.
+        self.ret_norm = RunningNorm(1).to(self.device)
 
         self.optimizer = torch.optim.Adam(
             list(self.actor.parameters()) + list(self.critic.parameters()),
@@ -169,6 +203,7 @@ class Trainer:
                 "actor": self.actor.state_dict(),
                 "critic": self.critic.state_dict(),
                 "norm": self.norm.state_dict(),
+                "ret_norm": self.ret_norm.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "cfg": self.cfg,
             },
@@ -182,6 +217,8 @@ class Trainer:
         self.actor.load_state_dict(ckpt["actor"])
         self.critic.load_state_dict(ckpt["critic"])
         self.norm.load_state_dict(ckpt["norm"])
+        if "ret_norm" in ckpt:
+            self.ret_norm.load_state_dict(ckpt["ret_norm"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         logger.info(f"Loaded checkpoint ← {path}")
 
@@ -248,6 +285,23 @@ class Trainer:
                     )
 
                 batch = _merge_rollouts(results, cfg.gamma, cfg.lam, self.device)
+
+                # Update the running return normalizer and derive (mean, std) so
+                # the value loss/clip are computed in scale-free units.
+                if cfg.normalize_returns:
+                    self.ret_norm.update(batch["returns"].reshape(-1, 1))
+                    value_norm = (
+                        self.ret_norm.mean.item(),
+                        self.ret_norm.var.sqrt().item(),
+                    )
+                    target_kl = cfg.target_kl
+                else:
+                    value_norm = (0.0, 1.0)
+                    target_kl = None
+
+                if cfg.symmetry_augment:
+                    batch = _augment_symmetry(batch, self.device)
+
                 n_total = cfg.n_workers * cfg.steps_per_worker
                 n_mini = max(1, min(cfg.mini_batch_size, n_total))
                 metrics = ppo_update(
@@ -261,6 +315,8 @@ class Trainer:
                     n_epochs=cfg.n_epochs,
                     mini_batch_size=n_mini,
                     max_grad_norm=cfg.max_grad_norm,
+                    value_norm=value_norm,
+                    target_kl=target_kl,
                 )
 
                 mean_return = sum(r.episode_return for r in results) / len(results)

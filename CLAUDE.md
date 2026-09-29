@@ -14,14 +14,18 @@ Uses uv + a Taskfile (go-task). Python 3.13 required. Runtime deps in `[project.
 
 ```bash
 task init                                # uv sync
-task train                               # train with default settings
-task train -- --workers 6 --steps 500   # train with custom args
-task play -- --checkpoint checkpoints/latest.pt  # visualize a trained policy
+task train                               # PPO (on-policy), default settings
+task train -- --workers 6 --steps 500   # PPO with custom args
+task train-tqc                           # TQC (off-policy, distributional)
+task train-tqc -- --steps 300000         # TQC with custom args
+task play -- --checkpoint checkpoints/latest.pt  # visualize (auto-detects PPO/TQC)
 task format                              # ruff format + ruff check --fix + mypy
 task test                                # pytest with coverage over n_cartpole/
 task ci                                  # format + test (local CI mirror)
 task clean                               # remove .venv, caches, checkpoints
 ```
+
+Two learners share the environment: **PPO** (`scripts/train.py`, `training/trainer.py`, `policy/ppo.py`) and **TQC** (`scripts/train_tqc.py`, `training/off_policy.py`, `policy/tqc.py`). TQC is off-policy and sample-efficient (Lee et al.'s algorithm); PPO is the on-policy baseline. Neither replaces the other — the PPO path is kept intact.
 
 Run a single test:
 ```bash
@@ -33,32 +37,42 @@ uv run pytest tests/test_dynamics.py::test_energy_conservation -v
 ```
 n_cartpole/
   env/
-    dynamics.py         — mass_matrix(), coriolis_and_gravity(), step() — pure numpy
-    double_cartpole.py  — gymnasium.Env wrapping dynamics; obs encoding, reward, done
+    dynamics.py         — mass_matrix(), rhs() with friction, step() — pure numpy + scipy
+    double_cartpole.py  — gymnasium.Env; obs encoding, bounded reward, diverse reset, OBS_MIRROR_SIGN
   policy/
-    actor_critic.py     — Actor, Critic MLPs + RunningNorm observation normalizer
-    ppo.py              — compute_gae(), ppo_update() — stateless functions
+    actor_critic.py     — PPO Actor, Critic MLPs + RunningNorm observation normalizer
+    ppo.py              — compute_gae(), ppo_update() (return-norm + target_kl) — stateless
+    tqc.py              — SquashedGaussianActor, QuantileCritic, quantile_huber_loss (TQC)
   training/
-    rollout.py          — rollout_worker() for torch.multiprocessing spawn workers
-    trainer.py          — Trainer class: broadcasts weights, aggregates trajectories, PPO update
+    rollout.py          — rollout_worker() for torch.multiprocessing spawn workers (PPO)
+    trainer.py          — PPO Trainer + _resolve_device() + _augment_symmetry()
+    off_policy.py       — TQC ReplayBuffer + TQCTrainer (off-policy loop, symmetric VER)
   viz/
     animate.py          — animate_episode() using matplotlib FuncAnimation
 scripts/
-  train.py              — CLI entry point: argparse → Trainer.train()
-  play.py               — CLI entry point: load checkpoint → animate_episode()
+  train.py              — PPO CLI: argparse → Trainer.train()
+  train_tqc.py          — TQC CLI: argparse → TQCTrainer.train()
+  play.py               — load checkpoint (PPO or TQC) → animate_episode()
 tests/
-  test_dynamics.py      — energy conservation, equilibrium, mass matrix PD
-  test_env.py           — gym API contract, obs shape, reward bounds, termination
+  test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD
+  test_env.py           — gym API contract, obs shape, bounded reward, termination
   test_ppo.py           — GAE formula, PPO losses finite, advantage normalization
+  test_training.py      — full PPO loop smoke test
 ```
 
 **State vs. observation**: The internal physics state is `[x, ẋ, θ₁, θ̇₁, θ₂, θ̇₂]` (6D, angles in radians, 0 = upright). The observation fed to the neural net is `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` (8D) to remove the angle discontinuity at ±π.
 
 **Angle convention**: θ = 0 means upright; θ = π means hanging straight down. Starting condition for training is a small random perturbation from `[0, 0, π, 0, π, 0]` (both poles down). Reward `cos θ₁ + cos θ₂` peaks at 2.0 (both upright) and bottoms at -2.0 (both down).
 
-**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
+**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001, hidden 128. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
+
+**Return normalization** (`normalize_returns`, default on): the value loss and its clip are computed in units of the running return std (`Trainer.ret_norm`), so `value_clip_eps=0.2` means "0.2 return-stds" rather than "0.2 raw reward". Without it, the fixed 0.2 clip throttles the critic because raw returns are O(100s). `target_kl=0.03` early-stops the epoch loop so the policy doesn't over-update once the critic is no longer suppressing actor gradients through the shared grad-norm clip.
 
 **Laptop defaults / speed**: The gradient update runs on CPU (`device="auto"` → CPU) and worker count defaults to `min(8, cpu_count-2)` to leave the machine responsive. On Apple Silicon a full run is a few minutes on CPU; forcing `--device mps` is much slower for this tiny network (see "Device selection" below).
+
+## Reward scale (the deep one)
+
+The reward `cos θ₁ + cos θ₂ − 0.1|x| − 0.001F²` is **additive and unbounded below**, so returns are O(±100s–1000s). That poor conditioning is the root cause of the value-clip/critic issues that `normalize_returns` patches around. Lee et al.'s multi-pendulum RL papers (in `docs/`) instead use a **bounded, multiplicative** reward — a product of terms each in ~[0,1] covering upright alignment (product over links), a cart-centering term, an angular-velocity term, and a mild action term — giving per-step reward in (0,1] and always-positive, well-scaled returns. Adopting that style would fix value scaling at the source and add the currently-missing velocity penalty (needed to *balance* rather than spin through upright). See the two PDFs in `docs/` for the exact forms.
 
 ## Things that will bite you
 

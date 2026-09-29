@@ -82,11 +82,26 @@ def ppo_update(
     n_epochs: int = 10,
     mini_batch_size: int = 256,
     max_grad_norm: float = 0.5,
+    value_norm: tuple[float, float] = (0.0, 1.0),
+    target_kl: float | None = None,
 ) -> PPOMetrics:
     """Run K epochs of PPO-clip mini-batch updates.
 
     Both actor and critic share the same optimizer so parameter groups
     can be managed in one place (e.g., for LR scheduling).
+
+    ``value_norm`` is ``(mean, std)`` of the return distribution. The value loss
+    and its clip are computed in these normalized units so that ``value_clip_eps``
+    means "fraction of a return std" rather than "raw reward units". The critic
+    still predicts raw returns; this only rescales the loss/clip so a fixed
+    ``value_clip_eps`` stays meaningful when returns are large (e.g. O(100s)).
+    The default ``(0.0, 1.0)`` leaves the update unchanged.
+
+    ``target_kl`` optionally early-stops the epoch loop once the mean approximate
+    KL for an epoch exceeds it, bounding how far the policy moves per rollout.
+    ``None`` disables early stopping. This matters once the value loss is properly
+    scaled: the large raw value loss used to suppress actor gradients through the
+    shared grad-norm clip, so without early stopping the policy can over-update.
 
     Returns aggregate scalar metrics averaged over all mini-batch steps.
     """
@@ -96,6 +111,9 @@ def ppo_update(
     advantages = batch["advantages"].detach()
     returns = batch["returns"].detach()
     old_values = batch["values"].detach()
+
+    ret_mean, ret_std = value_norm
+    inv_std = 1.0 / (ret_std + 1e-8)
 
     # Normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -111,6 +129,8 @@ def ppo_update(
 
     for _ in range(n_epochs):
         perm = torch.randperm(N, device=obs.device)
+        epoch_kl = 0.0
+        epoch_updates = 0
         for start in range(0, N, mini_batch_size):
             idx = perm[start : start + mini_batch_size]
             mb_obs = obs[idx]
@@ -129,16 +149,20 @@ def ppo_update(
             pg_clipped = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * mb_advantages
             policy_loss = -torch.min(pg_unclipped, pg_clipped).mean()
 
-            # Value loss (clipped)
+            # Value loss (clipped), computed in normalized return units so that
+            # value_clip_eps is scale-free. Critic still predicts raw returns.
             new_values = critic(mb_obs)
-            v_clipped = mb_old_values + (new_values - mb_old_values).clamp(
+            new_v_n = (new_values - ret_mean) * inv_std
+            old_v_n = (mb_old_values - ret_mean) * inv_std
+            ret_n = (mb_returns - ret_mean) * inv_std
+            v_clipped_n = old_v_n + (new_v_n - old_v_n).clamp(
                 -value_clip_eps, value_clip_eps
             )
             value_loss = (
                 0.5
                 * torch.max(
-                    (new_values - mb_returns).pow(2),
-                    (v_clipped - mb_returns).pow(2),
+                    (new_v_n - ret_n).pow(2),
+                    (v_clipped_n - ret_n).pow(2),
                 ).mean()
             )
 
@@ -163,6 +187,12 @@ def ppo_update(
             total_kl += approx_kl
             total_clip_frac += clip_frac
             updates += 1
+            epoch_kl += approx_kl
+            epoch_updates += 1
+
+        # Early-stop the epoch loop if the policy has moved too far this rollout.
+        if target_kl is not None and epoch_kl / max(1, epoch_updates) > target_kl:
+            break
 
     denom = max(1, updates)
     return PPOMetrics(

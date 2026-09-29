@@ -18,18 +18,25 @@ task init
 ## Quickstart
 
 ```bash
-# train with sensible laptop defaults (parallel CPU workers, CPU gradient update)
+# PPO (on-policy): parallel CPU workers, CPU gradient update
 task train
+
+# TQC (off-policy, distributional): sample-efficient, hardware-oriented
+task train-tqc -- --steps 300000
 
 # override any hyperparameter, e.g. more workers / longer rollouts
 task train -- --workers 8 --steps 2048 --iterations 300
 
-# force the gradient update onto a GPU (only worth it if you scale the net up)
-task train -- --device mps
-
-# watch a trained policy
+# watch a trained policy (auto-detects PPO vs TQC checkpoints)
 task play -- --checkpoint checkpoints/latest.pt
+task play -- --checkpoint checkpoints/tqc_latest.pt
 ```
+
+**Two learners.** PPO is the simple on-policy baseline. **TQC** (Truncated Quantile
+Critics) is the off-policy, distributional actor-critic that Lee et al. used for
+real multi-pendulum hardware — far more sample-efficient. Both share the
+environment, the bounded reward, symmetric data augmentation, and the diverse
+initial-state distribution described below.
 
 > **Device note:** the networks are small (8→64→64 MLPs), so the whole run is
 > fastest on CPU — GPU per-op dispatch overhead outweighs the tiny matmuls, and
@@ -51,7 +58,8 @@ task play -- --checkpoint checkpoints/latest.pt
 
 ## System
 
-- **Dynamics**: Lagrangian EOM for cart + 2 pendulums (point masses); RK45 integration at 50 Hz
-- **Policy**: Separate Actor and Critic MLPs (8 → 64 → 64 → 1), Gaussian policy with learnable log-std
-- **Training**: PPO-clip (ε=0.2), GAE (λ=0.95), parallel CPU rollout workers → CPU gradient update (MPS/CUDA optional via `--device`)
-- **Observation**: `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` — cos/sin encoding eliminates angle discontinuities
+- **Dynamics**: Lagrangian EOM for cart + 2 pendulums (point-mass bobs) with viscous cart/joint friction; RK45 at **100 Hz**. Buildable bench-scale defaults: 1 kg cart, ~0.2/0.15 kg bobs, 0.25 m rods, ±0.5 m rail, ±20 N motor.
+- **Reward**: bounded, multiplicative shaping in (0, 1] — `r_angle · r_pos · r_vel · r_act` (Lee et al.). Product over links forces *both* poles upright; the velocity term rewards balancing over spinning; always-positive returns stay well-scaled.
+- **Learners**: **PPO** (on-policy, GAE λ=0.95, ε=0.2, return-normalized value loss, KL early-stop) and **TQC** (off-policy, 2 quantile critics × 25 atoms with top-drop truncation, SAC-style auto-entropy, replay buffer).
+- **Sample efficiency**: left-right **symmetry augmentation** (mirror every transition) and a **diverse initial-state distribution** (30% fully-random resets for recovery from any configuration).
+- **Observation**: `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` — cos/sin encoding eliminates angle discontinuities.

@@ -55,20 +55,34 @@ def test_step_returns_correct_shape(params: PhysicsParams) -> None:
     assert next_state.shape == (6,)
 
 
-def test_energy_conservation_zero_force(params: PhysicsParams) -> None:
-    """With zero applied force, total mechanical energy should be conserved."""
+def test_energy_conservation_zero_force() -> None:
+    """Frictionless, with zero applied force, total mechanical energy is conserved."""
+    p = PhysicsParams(b=0.0, c1=0.0, c2=0.0)  # energy only conserves frictionless
     rng = np.random.default_rng(42)
     state = np.array(
         [0.0, 0.2, rng.uniform(-np.pi, np.pi), 0.5, rng.uniform(-np.pi, np.pi), -0.3]
     )
-    E0 = total_energy(state, params)
+    E0 = total_energy(state, p)
 
     for _ in range(500):
-        state = step(state, 0.0, params)
+        state = step(state, 0.0, p)
 
-    E_final = total_energy(state, params)
-    # RK45 with max_step=dt/4 should conserve energy to ~1e-4 J over 10 s
+    E_final = total_energy(state, p)
+    # RK45 with max_step=dt/4 should conserve energy tightly
     assert abs(E_final - E0) < 0.01, f"Energy drift: {abs(E_final - E0):.6f} J"
+
+
+def test_friction_dissipates_energy() -> None:
+    """With viscous friction and no force, mechanical energy must decrease."""
+    p = PhysicsParams()  # defaults include friction
+    assert p.b > 0 and p.c1 > 0 and p.c2 > 0
+    state = np.array([0.0, 0.3, 2.0, 1.0, -1.5, -0.8])
+    E0 = total_energy(state, p)
+
+    for _ in range(500):
+        state = step(state, 0.0, p)
+
+    assert total_energy(state, p) < E0
 
 
 def test_hanging_equilibrium_is_stable(params: PhysicsParams) -> None:

@@ -17,6 +17,11 @@ tasks:
     cmds:
       - uv run python scripts/train.py {{.CLI_ARGS}}
 
+  train-tqc:
+    desc: "Train the off-policy TQC policy; pass args with: task train-tqc -- --steps 300000"
+    cmds:
+      - uv run python scripts/train_tqc.py {{.CLI_ARGS}}
+
   play:
     desc: "Run a trained policy and show animation; pass args with: task play -- --checkpoint checkpoints/latest.pt"
     cmds:

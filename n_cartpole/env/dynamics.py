@@ -27,17 +27,37 @@ from scipy.integrate import solve_ivp
 
 @dataclass
 class PhysicsParams:
-    """Physical parameters of the double pendulum cartpole."""
+    """Physical parameters of the double pendulum cartpole.
 
-    M: float = 1.0
-    m1: float = 0.3
-    m2: float = 0.3
-    l1: float = 0.5
-    l2: float = 0.5
+    Defaults describe a small, buildable bench rig (belt-driven cart on a ~1 m
+    linear rail, two aluminium rods with end bobs), aligned with the hardware
+    inverted-pendulum literature (Lee et al.; see docs/):
+
+      - Masses/lengths are in the range of a desktop cart-pole.
+      - Viscous friction is modelled at the cart (``b``) and at each pivot
+        (``c1`` cart-link1 joint, ``c2`` link1-link2 joint). Real rigs always
+        have bearing/belt friction; only ``b=c1=c2=0`` conserves energy.
+      - ``dt=0.01`` is a 100 Hz control loop, typical for real double/triple
+        pendulum stabilization (fast enough for the short-time-constant top link).
+      - ``x_lim`` is the half-length of the rail; swing-up must happen within it.
+
+    The pendulums are modelled as point masses on massless rods — a bob-on-rod
+    build is a valid idealization. Distributed link inertia is a future upgrade.
+    """
+
+    M: float = 1.0  # cart mass (kg)
+    m1: float = 0.20  # link 1 bob mass (kg)
+    m2: float = 0.15  # link 2 bob mass (kg)
+    l1: float = 0.25  # link 1 length (m)
+    l2: float = 0.25  # link 2 length (m)
     g: float = 9.81
-    dt: float = 0.02
-    force_max: float = 20.0
-    x_lim: float = 5.0
+    dt: float = 0.01  # 100 Hz control loop
+    force_max: float = 20.0  # motor force limit (N)
+    x_lim: float = 0.5  # rail half-length (m)
+    # Viscous friction coefficients (0 = frictionless, energy-conserving).
+    b: float = 0.10  # cart, N/(m/s)
+    c1: float = 0.002  # cart-link1 joint, N·m/(rad/s)
+    c2: float = 0.002  # link1-link2 joint, N·m/(rad/s)
 
 
 def mass_matrix(theta1: float, theta2: float, p: PhysicsParams) -> np.ndarray:
@@ -78,14 +98,28 @@ def rhs(q: np.ndarray, qdot: np.ndarray, F: float, p: PhysicsParams) -> np.ndarr
     s2 = np.sin(theta2)
     s12 = np.sin(theta1 - theta2)
 
-    # Row 0 (x): Coriolis/centrifugal + external force
-    r0 = F + (p.m1 + p.m2) * p.l1 * s1 * td1**2 + p.m2 * p.l2 * s2 * td2**2
+    # Row 0 (x): Coriolis/centrifugal + external force + cart viscous friction
+    r0 = (
+        F
+        + (p.m1 + p.m2) * p.l1 * s1 * td1**2
+        + p.m2 * p.l2 * s2 * td2**2
+        - p.b * qdot[0]
+    )
 
+    # Viscous joint friction (dissipative, odd in velocity so mirror symmetry is
+    # preserved). Joint 1 opposes theta1_dot; joint 2 opposes the RELATIVE rate
+    # (theta2_dot - theta1_dot) and reacts back onto link 1.
+    rel = td2 - td1
     # Row 1 (theta1): gravity + Coriolis (theta2 rotating relative to theta1)
-    r1 = (p.m1 + p.m2) * p.g * p.l1 * s1 - p.m2 * p.l1 * p.l2 * s12 * td2**2
+    r1 = (
+        (p.m1 + p.m2) * p.g * p.l1 * s1
+        - p.m2 * p.l1 * p.l2 * s12 * td2**2
+        - p.c1 * td1
+        + p.c2 * rel
+    )
 
     # Row 2 (theta2): gravity + Coriolis (theta1 rotating relative to theta2)
-    r2 = p.m2 * p.g * p.l2 * s2 + p.m2 * p.l1 * p.l2 * s12 * td1**2
+    r2 = p.m2 * p.g * p.l2 * s2 + p.m2 * p.l1 * p.l2 * s12 * td1**2 - p.c2 * rel
 
     return np.array([r0, r1, r2])
 

@@ -66,16 +66,27 @@ def test_cos_sin_unit_circle(env: DoublePendulumCartpole) -> None:
 
 
 def test_reward_range(env: DoublePendulumCartpole) -> None:
-    """Reward must be roughly in [-3, 2.1] for typical states."""
+    """Bounded multiplicative reward must lie in (0, 1]."""
     env.reset(seed=0)
     rng = np.random.default_rng(0)
     for _ in range(50):
         action = rng.uniform(-1.0, 1.0, (1,)).astype(np.float32)
         _, reward, terminated, truncated, _ = env.step(action)
-        assert reward > -10.0  # sanity lower bound
-        assert reward < 5.0  # sanity upper bound
+        assert 0.0 <= reward <= 1.0 + 1e-6, f"reward {reward} out of (0, 1]"
         if terminated or truncated:
             env.reset()
+
+
+def test_reward_max_at_upright_centered() -> None:
+    """Reward approaches 1.0 only when both poles are upright, centered, at rest."""
+    env = DoublePendulumCartpole()
+    env.reset(seed=0)
+    env._state = np.zeros(6)  # both upright, centered, zero velocity
+    r_up = env._compute_reward(env._state, 0.0)
+    env._state = np.array([0.0, 0.0, np.pi, 0.0, np.pi, 0.0])  # both hanging down
+    r_down = env._compute_reward(env._state, 0.0)
+    assert r_up == pytest.approx(1.0, abs=1e-6)
+    assert r_down < 0.05
 
 
 def test_truncation_at_max_steps() -> None:
