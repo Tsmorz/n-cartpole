@@ -18,7 +18,9 @@ task train                               # PPO (on-policy), default settings
 task train -- --workers 6 --steps 500   # PPO with custom args
 task train-tqc                           # TQC (off-policy, distributional)
 task train-tqc -- --steps 300000         # TQC with custom args
-task play -- --checkpoint checkpoints/latest.pt  # visualize (auto-detects PPO/TQC)
+task play -- --checkpoint checkpoints/latest.pt  # interactive HTML replay (auto PPO/TQC)
+task plot                                # interactive training dashboard (metrics.csv)
+task policy-map                          # input→output force/value control-surface map
 task format                              # ruff format + ruff check --fix + mypy
 task test                                # pytest with coverage over n_cartpole/
 task ci                                  # format + test (local CI mirror)
@@ -47,12 +49,19 @@ n_cartpole/
     rollout.py          — rollout_worker() for torch.multiprocessing spawn workers (PPO)
     trainer.py          — PPO Trainer + _resolve_device() + _augment_symmetry()
     off_policy.py       — TQC ReplayBuffer + TQCTrainer (off-policy loop, symmetric VER)
+  policy/
+    loader.py           — load_policy(): PPO/TQC checkpoint → uniform action/value bundle
   viz/
-    animate.py          — animate_episode() using matplotlib FuncAnimation
+    style.py            — shared Plotly palette (validated, CVD-safe) + layout template
+    animate.py          — animate_episode(): interactive HTML replay + telemetry sidebar
+    plots.py            — plot_training_curves(): interactive training dashboard from metrics.csv
+    policy_map.py       — plot_policy_map(): input→output force/value contour phase-portrait
 scripts/
   train.py              — PPO CLI: argparse → Trainer.train()
   train_tqc.py          — TQC CLI: argparse → TQCTrainer.train()
-  play.py               — load checkpoint (PPO or TQC) → animate_episode()
+  play.py               — load checkpoint (PPO or TQC) → interactive HTML replay
+  plot_returns.py       — metrics.csv/returns.csv → interactive training dashboard (task plot)
+  policy_map.py         — checkpoint → input→output control-surface map (task policy-map)
 tests/
   test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD
   test_env.py           — gym API contract, obs shape, bounded reward, termination

@@ -63,12 +63,24 @@ class Actor(nn.Module):
     OBS_DIM = 8
     ACT_DIM = 1
 
-    def __init__(self, hidden: int = 64, obs_dim: int | None = None) -> None:
-        """Initialize Actor with given hidden layer size and observation width."""
+    def __init__(
+        self,
+        hidden: int = 64,
+        obs_dim: int | None = None,
+        log_std_init: float = 0.0,
+    ) -> None:
+        """Initialize Actor with given hidden size, obs width, and initial log_std.
+
+        ``log_std_init`` sets the initial exploration scale in *force units*. It
+        must be matched to ``force_max``: the default std of 1 N explores a tiny
+        band next to a 20 N limit, far too little force to pump a pendulum up, so
+        swing-up training needs a larger initial std (e.g. log_std_init≈1.6 → 5 N).
+        Entropy annealing then narrows it as the policy converges.
+        """
         super().__init__()
         self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
         self.net = _mlp(self.obs_dim, hidden, self.ACT_DIM)
-        self.log_std = nn.Parameter(torch.zeros(self.ACT_DIM))
+        self.log_std = nn.Parameter(torch.full((self.ACT_DIM,), log_std_init))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (mean, log_std) for the Gaussian policy."""

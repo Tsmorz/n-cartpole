@@ -98,10 +98,17 @@ class TrainingConfig:
     lam: float = 0.95
     clip_eps: float = 0.2
     value_clip_eps: float = 0.2
-    # Anneal entropy to 0: a persistent entropy bonus was inflating log_std once
-    # advantages shrank, collapsing the converged policy. Start modest, end off.
-    entropy_coeff_start: float = 0.005
+    # No entropy bonus: exploration comes from a large INITIAL policy std
+    # (log_std_init) that then anneals naturally under the policy gradient. A
+    # persistent entropy bonus instead pinned the std high (~9 N), keeping the
+    # policy too noisy to fine-tune balance at the top and biasing its gradient
+    # against the force-clamp. Set >0 only if a run collapses to no exploration.
+    entropy_coeff_start: float = 0.0
     entropy_coeff_end: float = 0.0
+    # Initial policy std in FORCE units (N). Must be a sizeable fraction of
+    # force_max or exploration is too small to discover the forces that swing the
+    # pendulum up. log(5) ≈ 1.6 → ~5 N initial std against the 20 N limit.
+    log_std_init: float = 1.6
     n_epochs: int = 10
     lr: float = 3e-4
     max_grad_norm: float = 0.5
@@ -183,8 +190,14 @@ class Trainer:
         logger.info(f"Links: {self.cfg.env.n_links} | observation dim: {self.obs_dim}")
         # Per-iteration mean episode return, for the training curve.
         self.return_history: list[float] = []
+        # Full per-iteration metrics (return + PPO diagnostics), for the dashboard.
+        self.metrics_history: list[dict[str, float]] = []
 
-        self.actor = Actor(hidden=self.cfg.hidden, obs_dim=self.obs_dim).to(self.device)
+        self.actor = Actor(
+            hidden=self.cfg.hidden,
+            obs_dim=self.obs_dim,
+            log_std_init=self.cfg.log_std_init,
+        ).to(self.device)
         self.critic = Critic(hidden=self.cfg.hidden, obs_dim=self.obs_dim).to(
             self.device
         )
@@ -234,6 +247,27 @@ class Trainer:
             for i, ret in enumerate(self.return_history, start=1):
                 writer.writerow([i, ret])
         logger.info(f"Saved return history → {path}")
+
+    # Column order for metrics.csv (matches the training dashboard's panels).
+    _METRIC_COLS = (
+        "iteration",
+        "mean_return",
+        "value_loss",
+        "policy_loss",
+        "entropy",
+        "approx_kl",
+        "clip_fraction",
+    )
+
+    def save_metrics_history(self, path: Path) -> None:
+        """Write per-iteration return + PPO diagnostics to a CSV (for the dashboard)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(self._METRIC_COLS)
+            for i, m in enumerate(self.metrics_history, start=1):
+                writer.writerow([i] + [m.get(c, "") for c in self._METRIC_COLS[1:]])
+        logger.info(f"Saved metrics history → {path}")
 
     def load(self, path: Path) -> None:
         """Load checkpoint."""
@@ -346,6 +380,16 @@ class Trainer:
 
                 mean_return = sum(r.episode_return for r in results) / len(results)
                 self.return_history.append(mean_return)
+                self.metrics_history.append(
+                    {
+                        "mean_return": mean_return,
+                        "policy_loss": metrics["policy_loss"],
+                        "value_loss": metrics["value_loss"],
+                        "entropy": metrics["entropy"],
+                        "approx_kl": metrics["approx_kl"],
+                        "clip_fraction": metrics["clip_fraction"],
+                    }
+                )
                 pbar.set_postfix(
                     ret=f"{mean_return:.1f}",
                     π=f"{metrics['policy_loss']:.4f}",
@@ -376,6 +420,7 @@ class Trainer:
                 p.join(timeout=5)
             self.save(cfg.checkpoint_dir / "latest.pt")
             self.save_return_history(cfg.checkpoint_dir / "returns.csv")
+            self.save_metrics_history(cfg.checkpoint_dir / "metrics.csv")
 
         if interrupted:
             logger.info("Resume with: task train -- --resume checkpoints/latest.pt")

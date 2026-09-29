@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume", type=Path, default=None, help="Resume from checkpoint path"
     )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=None,
+        help="Save a checkpoint every N iterations (default: 50)",
+    )
     return parser.parse_args()
 
 
@@ -78,6 +84,8 @@ def main() -> None:
         cfg.n_workers = args.workers
     if args.mini_batch is not None:
         cfg.mini_batch_size = args.mini_batch
+    if args.checkpoint_every is not None:
+        cfg.checkpoint_every = args.checkpoint_every
 
     trainer = Trainer(cfg)
 

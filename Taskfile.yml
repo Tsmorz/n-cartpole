@@ -23,9 +23,19 @@ tasks:
       - uv run python scripts/train_tqc.py {{.CLI_ARGS}}
 
   play:
-    desc: "Run a trained policy and show animation; pass args with: task play -- --checkpoint checkpoints/latest.pt"
+    desc: "Run a trained policy and open an interactive HTML replay; args: task play -- --checkpoint checkpoints/latest.pt"
     cmds:
       - uv run python scripts/play.py {{.CLI_ARGS}}
+
+  plot:
+    desc: "Render the interactive training dashboard from checkpoints/metrics.csv"
+    cmds:
+      - uv run python scripts/plot_returns.py {{.CLI_ARGS}}
+
+  policy-map:
+    desc: "Visualize the policy input→output map; args: task policy-map -- --x theta1 --y theta1dot"
+    cmds:
+      - uv run python scripts/policy_map.py {{.CLI_ARGS}}
 
   test:
     desc: Run the test suite with coverage

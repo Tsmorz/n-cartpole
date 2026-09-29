@@ -1,28 +1,24 @@
-"""CLI entry point for visualizing a trained double cartpole policy."""
+"""CLI: visualize a trained cartpole policy as an interactive HTML replay."""
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
-import torch
 from loguru import logger
 
 from n_cartpole.env.double_cartpole import EnvConfig
-from n_cartpole.env.dynamics import PhysicsParams
-from n_cartpole.env.factory import env_spec, make_env
-from n_cartpole.policy.actor_critic import Actor, RunningNorm
-from n_cartpole.policy.tqc import SquashedGaussianActor
+from n_cartpole.env.factory import make_env
+from n_cartpole.policy.loader import PolicyBundle, load_policy
 from n_cartpole.viz.animate import animate_episode
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Visualize a trained double cartpole policy."
+        description="Visualize a trained cartpole policy (interactive HTML replay)."
     )
     parser.add_argument(
         "--checkpoint",
@@ -34,96 +30,80 @@ def parse_args() -> argparse.Namespace:
         "--episodes", type=int, default=1, help="Number of episodes to run"
     )
     parser.add_argument(
-        "--save",
+        "--out",
         type=Path,
-        default=None,
-        help="Save animation to file (.gif or .mp4) instead of showing",
+        default=Path("checkpoints/replay.html"),
+        help="Output HTML path for the replay",
     )
     parser.add_argument(
         "--speed", type=float, default=1.0, help="Animation playback speed"
+    )
+    parser.add_argument(
+        "--no-open", action="store_true", help="Do not open the HTML in a browser"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
 
 
 def run_episode(
-    select_action: Callable[[torch.Tensor], np.ndarray],
-    norm: RunningNorm,
+    bundle: PolicyBundle,
     env: gym.Env,
-    device: torch.device,
     seed: int | None = None,
-) -> tuple[np.ndarray, float]:
-    """Roll out one deterministic episode and return states + total reward."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Roll out one deterministic episode.
+
+    Returns (states (T,·), actions (T-1,), rewards (T-1,), total_reward).
+    """
     obs, _ = env.reset(seed=seed)
     states = [env.get_state()]
+    actions: list[float] = []
+    rewards: list[float] = []
     total_reward = 0.0
 
-    with torch.no_grad():
-        terminated = truncated = False
-        while not (terminated or truncated):
-            obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
-            obs_norm = norm.normalize(obs_t)
-            action = select_action(obs_norm)
-            obs, reward, terminated, truncated, _ = env.step(action)
-            states.append(env.get_state())
-            total_reward += reward
+    terminated = truncated = False
+    while not (terminated or truncated):
+        obs_norm = bundle.normalize(np.asarray(obs)[None, :])
+        action = bundle.select_action(obs_norm)[0]
+        obs, reward, terminated, truncated, _ = env.step(action)
+        states.append(env.get_state())
+        actions.append(float(np.asarray(action).reshape(-1)[0]))
+        rewards.append(float(reward))
+        total_reward += reward
 
-    return np.array(states), total_reward
+    return np.array(states), np.array(actions), np.array(rewards), total_reward
 
 
 def main() -> None:
-    """Load checkpoint, run episodes, and visualize."""
+    """Load checkpoint, run episodes, and write interactive replays."""
     args = parse_args()
-
-    if not args.checkpoint.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
-
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg = ckpt.get("cfg")
-    hidden = cfg.hidden if cfg is not None else 64
-    physics = cfg.env.physics if cfg is not None else PhysicsParams()
-    algo = ckpt.get("algo", "ppo")
-    device = torch.device("cpu")
-
-    n_links = getattr(cfg.env, "n_links", 2) if cfg is not None else 2
-    obs_dim, _ = env_spec(n_links)
-
-    norm = RunningNorm(obs_dim)
-    norm.load_state_dict(ckpt["norm"])
-
-    if algo == "tqc":
-        actor = SquashedGaussianActor(hidden=hidden, force_max=physics.force_max)
-        actor.load_state_dict(ckpt["actor"])
-        actor.eval()
-
-        def select_action(obs_norm: torch.Tensor) -> np.ndarray:
-            return actor.act(obs_norm, deterministic=True).squeeze(0).cpu().numpy()
-    else:
-        ppo_actor = Actor(hidden=hidden, obs_dim=obs_dim)
-        ppo_actor.load_state_dict(ckpt["actor"])
-        ppo_actor.eval()
-
-        def select_action(obs_norm: torch.Tensor) -> np.ndarray:
-            mean, _ = ppo_actor(obs_norm)  # deterministic: use the mean
-            return mean.squeeze(0).cpu().numpy()
-
-    logger.info(f"Loaded {algo.upper()} policy from {args.checkpoint} ({n_links}-link)")
-    env = make_env(EnvConfig(physics=physics, n_links=n_links))
+    bundle = load_policy(args.checkpoint)
+    logger.info(
+        f"Loaded {bundle.algo.upper()} policy from {args.checkpoint} "
+        f"({bundle.n_links}-link)"
+    )
+    env = make_env(EnvConfig(physics=bundle.physics, n_links=bundle.n_links))
 
     for ep in range(args.episodes):
         seed = args.seed + ep
-        states, total_reward = run_episode(select_action, norm, env, device, seed=seed)
+        states, actions, rewards, total_reward = run_episode(bundle, env, seed=seed)
         logger.info(
             f"Episode {ep + 1}: {len(states)} steps, total reward = {total_reward:.2f}"
         )
 
-        save_path = None
-        if args.save is not None:
-            stem = args.save.stem + (f"_ep{ep + 1}" if args.episodes > 1 else "")
-            save_path = args.save.with_name(stem + args.save.suffix)
-
+        out = args.out
+        if args.episodes > 1:
+            out = out.with_stem(f"{out.stem}_ep{ep + 1}")
         animate_episode(
-            states, physics, dt=physics.dt, save_path=save_path, speed=args.speed
+            states,
+            bundle.physics,
+            dt=bundle.physics.dt,
+            save_path=out,
+            speed=args.speed,
+            actions=actions,
+            rewards=rewards,
+            title=f"{bundle.algo.upper()} · {bundle.n_links}-link · "
+            f"return {total_reward:.1f}",
+            open_browser=not args.no_open,
         )
 
 

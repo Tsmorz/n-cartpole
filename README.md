@@ -27,10 +27,24 @@ task train-tqc -- --steps 300000
 # override any hyperparameter, e.g. more workers / longer rollouts
 task train -- --workers 8 --steps 2048 --iterations 300
 
-# watch a trained policy (auto-detects PPO vs TQC checkpoints)
+# watch a trained policy — interactive HTML replay (auto-detects PPO vs TQC)
 task play -- --checkpoint checkpoints/latest.pt
 task play -- --checkpoint checkpoints/tqc_latest.pt
+
+# interactive training dashboard (return + PPO diagnostics) from metrics.csv
+task plot
+
+# the policy's input→output map: force (and value) over two state dims + slider
+task policy-map -- --x theta1 --y theta1dot --slider theta2
 ```
+
+**Visualization.** Every view renders to a self-contained, interactive **Plotly**
+HTML page (hover, zoom, play/scrub) — no static PNGs. `task play` gives a scrub-able
+cart-and-poles replay with a synced telemetry sidebar (uprightness, cart position,
+applied force, per-step reward). `task policy-map` turns the trained MLP into a
+readable control surface — a contour phase-portrait of the force the policy applies
+across a plane of states (blue = push right, red = push left), with a slider over a
+third dimension. `task plot` renders the training curves as small multiples.
 
 **Two learners.** PPO is the simple on-policy baseline. **TQC** (Truncated Quantile
 Critics) is the off-policy, distributional actor-critic that Lee et al. used for
@@ -50,7 +64,9 @@ initial-state distribution described below.
 |---|---|
 | `task init` | Create virtual environment and install deps |
 | `task train` | Train the PPO policy (default settings) |
-| `task play` | Run a trained policy and visualize |
+| `task play` | Interactive HTML replay of a trained policy |
+| `task plot` | Interactive training dashboard from `metrics.csv` |
+| `task policy-map` | Interactive input→output (force/value) control-surface map |
 | `task test` | Run tests with coverage |
 | `task format` | Ruff format + lint + mypy |
 | `task ci` | Full local CI (format + test) |
