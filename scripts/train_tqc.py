@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
         description="Train a TQC (off-policy) policy for double cartpole swing-up."
     )
     parser.add_argument("--steps", type=int, default=200_000, help="Total env steps")
-    parser.add_argument("--hidden", type=int, default=128, help="MLP hidden size")
+    parser.add_argument("--hidden", type=int, default=256, help="MLP hidden size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate")
     parser.add_argument("--batch", type=int, default=256, help="Minibatch size")
     parser.add_argument("--n-critics", type=int, default=2, help="Number of critics")

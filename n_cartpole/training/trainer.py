@@ -91,7 +91,7 @@ class TrainingConfig:
         default_factory=lambda: max(1, min(8, (os.cpu_count() or 2) - 2))
     )
     steps_per_worker: int = 2048
-    hidden: int = 128
+    hidden: int = 256
 
     # PPO
     gamma: float = 0.99
@@ -217,10 +217,11 @@ class Trainer:
             self.cfg.entropy_coeff_end - self.cfg.entropy_coeff_start
         )
 
-    def _cpu_state_dicts(self) -> tuple[dict, dict]:
+    def _cpu_state_dicts(self) -> tuple[dict, dict, dict]:
         actor_sd = {k: v.cpu() for k, v in self.actor.state_dict().items()}
         critic_sd = {k: v.cpu() for k, v in self.critic.state_dict().items()}
-        return actor_sd, critic_sd
+        norm_sd = {k: v.cpu() for k, v in self.norm.state_dict().items()}
+        return actor_sd, critic_sd, norm_sd
 
     def save(self, path: Path) -> None:
         """Save checkpoint."""
@@ -315,10 +316,12 @@ class Trainer:
         try:
             pbar = tqdm(range(1, cfg.n_iterations + 1), desc="Training", unit="iter")
             for iteration in pbar:
-                # Broadcast current weights to all workers
-                actor_sd, critic_sd = self._cpu_state_dicts()
+                # Broadcast current weights + observation-normalizer stats to all
+                # workers, so rollout-time action selection uses the same
+                # normalized observations the PPO update evaluates log-probs on.
+                actor_sd, critic_sd, norm_sd = self._cpu_state_dicts()
                 for q in command_queues:
-                    q.put((actor_sd, critic_sd))
+                    q.put((actor_sd, critic_sd, norm_sd))
 
                 # Collect results
                 results: list[RolloutResult] = []
@@ -328,14 +331,15 @@ class Trainer:
                         raise RuntimeError(msg)
                     results.append(msg)
 
-                # Update observation normalizer
-                all_obs = torch.from_numpy(
+                # Normalize observations using the SAME stats the rollout workers
+                # were broadcast at the start of this iteration (before any update),
+                # so old_log_probs (computed by workers) and the log_probs
+                # recomputed during the PPO update agree on input scale — otherwise
+                # the importance ratio reflects a normalization shift rather than
+                # an actual policy change.
+                raw_obs_for_norm_update = torch.from_numpy(
                     results[0].obs  # use first worker for norm update
                 ).to(self.device)
-                self.norm.update(all_obs)
-
-                # Normalize observations across all results
-                # (norm params are frozen during update — Welford already updated above)
                 for r in results:
                     r.obs = (
                         self.norm.normalize(torch.from_numpy(r.obs).to(self.device))
@@ -344,6 +348,11 @@ class Trainer:
                     )
 
                 batch = _merge_rollouts(results, cfg.gamma, cfg.lam, self.device)
+
+                # Update the running normalizer AFTER building this iteration's
+                # batch; the new stats take effect starting with next iteration's
+                # broadcast, not retroactively on the batch just collected.
+                self.norm.update(raw_obs_for_norm_update)
 
                 # Update the running return normalizer and derive (mean, std) so
                 # the value loss/clip are computed in scale-free units.

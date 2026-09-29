@@ -4,7 +4,7 @@ Each worker runs inside a separate process (torch.multiprocessing spawn context)
 Workers always use CPU — only the main process moves tensors to MPS/CUDA for updates.
 
 Communication protocol:
-  command_queue  <-- main sends actor+critic state_dicts or 'stop'
+  command_queue  <-- main sends actor+critic+norm state_dicts or 'stop'
   result_queue   --> worker sends RolloutResult or exception string
 """
 
@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 
 from n_cartpole.env.double_cartpole import EnvConfig
 from n_cartpole.env.factory import make_env
-from n_cartpole.policy.actor_critic import Actor, Critic
+from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
 
 
 @dataclass
@@ -54,6 +54,7 @@ def rollout_worker(
     env = make_env(env_config)
     actor = Actor(hidden=hidden, obs_dim=obs_dim).to(device)
     critic = Critic(hidden=hidden, obs_dim=obs_dim).to(device)
+    norm = RunningNorm(obs_dim).to(device)
 
     obs_arr = np.zeros((n_steps, obs_dim), dtype=np.float32)
     act_arr = np.zeros((n_steps, 1), dtype=np.float32)
@@ -72,9 +73,10 @@ def rollout_worker(
             if msg == "stop":
                 break
 
-            actor_sd, critic_sd = msg
+            actor_sd, critic_sd, norm_sd = msg
             actor.load_state_dict(actor_sd)
             critic.load_state_dict(critic_sd)
+            norm.load_state_dict(norm_sd)
             actor.eval()
             critic.eval()
 
@@ -83,8 +85,9 @@ def rollout_worker(
             with torch.no_grad():
                 for t in range(n_steps):
                     obs_t = torch.from_numpy(obs).unsqueeze(0)
-                    action, log_prob = actor.sample_action(obs_t, force_max)
-                    value = critic(obs_t)
+                    obs_norm_t = norm.normalize(obs_t)
+                    action, log_prob = actor.sample_action(obs_norm_t, force_max)
+                    value = critic(obs_norm_t)
 
                     act_np = action.squeeze(0).numpy()
                     obs_arr[t] = obs
@@ -97,7 +100,7 @@ def rollout_worker(
                     done = terminated or truncated
                     done_arr[t] = done
 
-                    episode_return += reward
+                    episode_return += float(reward)
                     obs = next_obs
 
                     if done:
@@ -107,7 +110,7 @@ def rollout_worker(
 
                 # Bootstrap value for last state
                 obs_t = torch.from_numpy(obs).unsqueeze(0)
-                last_value = critic(obs_t).item()
+                last_value = critic(norm.normalize(obs_t)).item()
 
             result_queue.put(
                 RolloutResult(

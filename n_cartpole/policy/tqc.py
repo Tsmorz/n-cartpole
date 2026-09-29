@@ -17,16 +17,14 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
+from n_cartpole.policy.simba import SimbaNet
+
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
 
 
-def _mlp(in_dim: int, hidden: int, out_dim: int, depth: int = 2) -> nn.Sequential:
-    layers: list[nn.Module] = [nn.Linear(in_dim, hidden), nn.ReLU()]
-    for _ in range(depth - 1):
-        layers += [nn.Linear(hidden, hidden), nn.ReLU()]
-    layers += [nn.Linear(hidden, out_dim)]
-    return nn.Sequential(*layers)
+def _mlp(in_dim: int, hidden: int, out_dim: int, n_blocks: int = 2) -> SimbaNet:
+    return SimbaNet(in_dim, hidden, out_dim, n_blocks=n_blocks)
 
 
 class SquashedGaussianActor(nn.Module):
@@ -35,10 +33,12 @@ class SquashedGaussianActor(nn.Module):
     OBS_DIM = 8
     ACT_DIM = 1
 
-    def __init__(self, hidden: int = 128, force_max: float = 20.0) -> None:
+    def __init__(
+        self, hidden: int = 256, force_max: float = 20.0, blocks: int = 2
+    ) -> None:
         """Build the policy network for the given action bound."""
         super().__init__()
-        self.net = _mlp(self.OBS_DIM, hidden, 2 * self.ACT_DIM)
+        self.net = _mlp(self.OBS_DIM, hidden, 2 * self.ACT_DIM, n_blocks=blocks)
         self.force_max = float(force_max)
 
     def _mean_logstd(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -76,14 +76,18 @@ class QuantileCritic(nn.Module):
     ACT_DIM = 1
 
     def __init__(
-        self, hidden: int = 128, n_critics: int = 2, n_quantiles: int = 25
+        self,
+        hidden: int = 256,
+        n_critics: int = 2,
+        n_quantiles: int = 25,
+        blocks: int = 2,
     ) -> None:
         """Build ``n_critics`` quantile heads."""
         super().__init__()
         self.n_critics = n_critics
         self.n_quantiles = n_quantiles
         self.nets = nn.ModuleList(
-            _mlp(self.OBS_DIM + self.ACT_DIM, hidden, n_quantiles)
+            _mlp(self.OBS_DIM + self.ACT_DIM, hidden, n_quantiles, n_blocks=blocks)
             for _ in range(n_critics)
         )
 

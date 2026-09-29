@@ -16,7 +16,9 @@ from n_cartpole.env.single_cartpole import OBS_MIRROR_SIGN as SINGLE_MIRROR
 from n_cartpole.env.single_cartpole import SinglePendulumCartpole
 
 
-def make_env(config: EnvConfig) -> gym.Env:
+def make_env(
+    config: EnvConfig,
+) -> DoublePendulumCartpole | SinglePendulumCartpole:
     """Return the env matching ``config.n_links`` (1 → single, else double)."""
     if config.n_links == 1:
         return SinglePendulumCartpole(config)

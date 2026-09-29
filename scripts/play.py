@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import gymnasium as gym
 import numpy as np
 from loguru import logger
 
-from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
 from n_cartpole.env.factory import make_env
+from n_cartpole.env.single_cartpole import SinglePendulumCartpole
 from n_cartpole.policy.loader import PolicyBundle, load_policy
 from n_cartpole.viz.animate import animate_episode
 
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_episode(
     bundle: PolicyBundle,
-    env: gym.Env,
+    env: DoublePendulumCartpole | SinglePendulumCartpole,
     seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Roll out one deterministic episode.
@@ -68,7 +68,7 @@ def run_episode(
         states.append(env.get_state())
         actions.append(float(np.asarray(action).reshape(-1)[0]))
         rewards.append(float(reward))
-        total_reward += reward
+        total_reward += float(reward)
 
     return np.array(states), np.array(actions), np.array(rewards), total_reward
 

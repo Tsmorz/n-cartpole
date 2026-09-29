@@ -38,7 +38,7 @@ class TQCConfig:
 
     env: EnvConfig = field(default_factory=EnvConfig)
     device: str = "auto"
-    hidden: int = 128
+    hidden: int = 256
     n_critics: int = 2
     n_quantiles: int = 25
     top_quantiles_to_drop: int = 2  # dropped from the pooled n_critics*n_quantiles

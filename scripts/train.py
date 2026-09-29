@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         "--iterations", type=int, default=300, help="Number of PPO iterations"
     )
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate")
-    parser.add_argument("--hidden", type=int, default=128, help="MLP hidden layer size")
+    parser.add_argument("--hidden", type=int, default=256, help="MLP hidden layer size")
     parser.add_argument(
         "--mini-batch",
         type=int,

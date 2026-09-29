@@ -6,6 +6,8 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
+from n_cartpole.policy.simba import SimbaNet
+
 
 class RunningNorm(nn.Module):
     """Online running mean/variance normalizer using Welford's algorithm."""
@@ -43,14 +45,8 @@ class RunningNorm(nn.Module):
         return (x - self.mean) / (self.var.sqrt() + 1e-8)
 
 
-def _mlp(in_dim: int, hidden: int, out_dim: int) -> nn.Sequential:
-    return nn.Sequential(
-        nn.Linear(in_dim, hidden),
-        nn.Tanh(),
-        nn.Linear(hidden, hidden),
-        nn.Tanh(),
-        nn.Linear(hidden, out_dim),
-    )
+def _mlp(in_dim: int, hidden: int, out_dim: int, n_blocks: int = 2) -> SimbaNet:
+    return SimbaNet(in_dim, hidden, out_dim, n_blocks=n_blocks)
 
 
 class Actor(nn.Module):
@@ -65,9 +61,10 @@ class Actor(nn.Module):
 
     def __init__(
         self,
-        hidden: int = 64,
+        hidden: int = 256,
         obs_dim: int | None = None,
         log_std_init: float = 0.0,
+        blocks: int = 2,
     ) -> None:
         """Initialize Actor with given hidden size, obs width, and initial log_std.
 
@@ -79,7 +76,7 @@ class Actor(nn.Module):
         """
         super().__init__()
         self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
-        self.net = _mlp(self.obs_dim, hidden, self.ACT_DIM)
+        self.net = _mlp(self.obs_dim, hidden, self.ACT_DIM, n_blocks=blocks)
         self.log_std = nn.Parameter(torch.full((self.ACT_DIM,), log_std_init))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -136,11 +133,13 @@ class Critic(nn.Module):
 
     OBS_DIM = 8
 
-    def __init__(self, hidden: int = 64, obs_dim: int | None = None) -> None:
+    def __init__(
+        self, hidden: int = 256, obs_dim: int | None = None, blocks: int = 2
+    ) -> None:
         """Initialize Critic with given hidden layer size and observation width."""
         super().__init__()
         self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
-        self.net = _mlp(self.obs_dim, hidden, 1)
+        self.net = _mlp(self.obs_dim, hidden, 1, n_blocks=blocks)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """Return value estimates with shape (batch,)."""

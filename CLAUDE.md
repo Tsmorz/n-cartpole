@@ -73,7 +73,7 @@ tests/
 
 **Angle convention**: θ = 0 means upright; θ = π means hanging straight down. Starting condition for training is a small random perturbation from `[0, 0, π, 0, π, 0]` (both poles down). Reward `cos θ₁ + cos θ₂` peaks at 2.0 (both upright) and bottoms at -2.0 (both down).
 
-**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001, hidden 128. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
+**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001, hidden 256. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
 
 **Return normalization** (`normalize_returns`, default on): the value loss and its clip are computed in units of the running return std (`Trainer.ret_norm`), so `value_clip_eps=0.2` means "0.2 return-stds" rather than "0.2 raw reward". Without it, the fixed 0.2 clip throttles the critic because raw returns are O(100s). `target_kl=0.03` early-stops the epoch loop so the policy doesn't over-update once the critic is no longer suppressing actor gradients through the shared grad-norm clip.
 
