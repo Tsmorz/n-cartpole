@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A reinforcement learning project that trains a PPO policy to swing up and balance a double pendulum cartpole. The system consists of a cart (mass M) on a frictionless track with two pendulums in series — the goal is to apply horizontal forces to the cart to swing both poles from the hanging-down position to upright and hold them there.
 
-The package name is `n_cartpole`. Physics are simulated with a Lagrangian-derived analytical model (no sympy at runtime — equations are hard-coded). Policy learning uses PPO with GAE and parallel rollout collection on multiple CPU workers, with gradient updates on MPS (Apple Silicon), CUDA, or CPU depending on hardware.
+The package name is `n_cartpole`. Physics are simulated with a Lagrangian-derived analytical model (no sympy at runtime — equations are hard-coded). Policy learning uses PPO with GAE and parallel rollout collection on multiple CPU workers. The gradient update runs on CPU by default because the networks are tiny; MPS/CUDA are available via `--device` but are slower for this workload (see "Device selection" below).
 
 ## Commands
 
@@ -56,11 +56,15 @@ tests/
 
 **Angle convention**: θ = 0 means upright; θ = π means hanging straight down. Starting condition for training is a small random perturbation from `[0, 0, π, 0, π, 0]` (both poles down). Reward `cos θ₁ + cos θ₂` peaks at 2.0 (both upright) and bottoms at -2.0 (both down).
 
-**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, grad clip 0.5, entropy coeff 0.01 → 0.001.
+**PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
+
+**Laptop defaults / speed**: The gradient update runs on CPU (`device="auto"` → CPU) and worker count defaults to `min(8, cpu_count-2)` to leave the machine responsive. On Apple Silicon a full run is a few minutes on CPU; forcing `--device mps` is much slower for this tiny network (see "Device selection" below).
 
 ## Things that will bite you
 
-**MPS and multiprocessing**: MPS (Apple Silicon GPU) cannot be used inside spawned worker processes — the workers always run on CPU. Only the main process (PPO update) uses MPS. Don't try to move tensors to MPS inside `rollout_worker`.
+**Device selection**: `_resolve_device()` maps `device="auto"` to **CPU**, not MPS. This is deliberate: the actor/critic are tiny (8→64→64) and batches are small, so GPU per-op dispatch overhead outweighs the math. Measured on Apple Silicon, the PPO update is ~3x slower on MPS than CPU, and `compute_gae` is ~250x slower on MPS because its Python loop reads scalars back with `.item()` every step, forcing a device sync each time. Keep `auto`/`cpu` unless you substantially enlarge the network, in which case `--device mps`/`--device cuda` may pay off (and consider vectorizing `compute_gae` first). Rollout workers always run on CPU regardless.
+
+**MPS and multiprocessing**: MPS (Apple Silicon GPU) cannot be used inside spawned worker processes — the workers always run on CPU. Only the main process (PPO update) could use MPS, and only if explicitly requested via `--device mps`. Don't try to move tensors to MPS inside `rollout_worker`.
 
 **Angle wrapping**: The internal state angles are not wrapped — they can accumulate beyond ±π during long episodes with rapid spinning. This is intentional: the RK45 integrator handles it correctly and the cos/sin observation encoding is already periodic. Do not wrap angles in dynamics.py or you'll break energy conservation.
 

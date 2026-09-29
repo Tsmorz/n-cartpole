@@ -18,12 +18,24 @@ task init
 ## Quickstart
 
 ```bash
-# train with all available CPU workers, gradient updates on MPS (Apple Silicon)
+# train with sensible laptop defaults (parallel CPU workers, CPU gradient update)
 task train
+
+# override any hyperparameter, e.g. more workers / longer rollouts
+task train -- --workers 8 --steps 2048 --iterations 300
+
+# force the gradient update onto a GPU (only worth it if you scale the net up)
+task train -- --device mps
 
 # watch a trained policy
 task play -- --checkpoint checkpoints/latest.pt
 ```
+
+> **Device note:** the networks are small (8→64→64 MLPs), so the whole run is
+> fastest on CPU — GPU per-op dispatch overhead outweighs the tiny matmuls, and
+> the GAE step is dramatically slower on MPS. `--device auto` therefore selects
+> CPU. Use `--device mps`/`--device cuda` only after substantially enlarging the
+> network.
 
 ## Development
 
@@ -41,5 +53,5 @@ task play -- --checkpoint checkpoints/latest.pt
 
 - **Dynamics**: Lagrangian EOM for cart + 2 pendulums (point masses); RK45 integration at 50 Hz
 - **Policy**: Separate Actor and Critic MLPs (8 → 64 → 64 → 1), Gaussian policy with learnable log-std
-- **Training**: PPO-clip (ε=0.2), GAE (λ=0.95), parallel CPU rollout workers → MPS gradient update
+- **Training**: PPO-clip (ε=0.2), GAE (λ=0.95), parallel CPU rollout workers → CPU gradient update (MPS/CUDA optional via `--device`)
 - **Observation**: `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` — cos/sin encoding eliminates angle discontinuities

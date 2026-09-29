@@ -29,6 +29,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate")
     parser.add_argument("--hidden", type=int, default=64, help="MLP hidden layer size")
     parser.add_argument(
+        "--mini-batch",
+        type=int,
+        default=None,
+        help="PPO minibatch size (default: 512)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "mps", "cuda"],
+        help="Gradient-update device. 'auto' picks CPU, which is fastest for this "
+        "small network; use 'mps'/'cuda' only if you scale the network up.",
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=Path("checkpoints"),
@@ -46,6 +60,7 @@ def main() -> None:
 
     cfg = TrainingConfig(
         env=EnvConfig(physics=PhysicsParams()),
+        device=args.device,
         steps_per_worker=args.steps,
         hidden=args.hidden,
         lr=args.lr,
@@ -54,6 +69,8 @@ def main() -> None:
     )
     if args.workers is not None:
         cfg.n_workers = args.workers
+    if args.mini_batch is not None:
+        cfg.mini_batch_size = args.mini_batch
 
     trainer = Trainer(cfg)
 

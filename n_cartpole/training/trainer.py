@@ -17,12 +17,34 @@ from n_cartpole.policy.ppo import Batch, compute_gae, ppo_update
 from n_cartpole.training.rollout import RolloutResult, rollout_worker
 
 
-def _get_device() -> torch.device:
-    """Select the best available training device."""
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
+def _resolve_device(pref: str) -> torch.device:
+    """Resolve the training device from a preference string.
+
+    Accepts "cpu", "mps", "cuda", or "auto". Anything unavailable falls back
+    to CPU.
+
+    Why "auto" picks CPU here: the actor/critic are tiny (8→64→64 MLPs) and the
+    per-iteration batch is small, so GPU per-op dispatch overhead dominates the
+    actual math. Measured on Apple Silicon, the PPO update is ~3x slower on MPS
+    than CPU, and compute_gae — which reads scalars back with .item() each step —
+    is ~250x slower on MPS because every read forces a device sync. CPU is the
+    fast choice for this workload; MPS/CUDA remain available via an explicit
+    preference if the network or batch is scaled up substantially.
+    """
+    pref = pref.lower()
+    if pref == "cpu":
+        return torch.device("cpu")
+    if pref == "mps":
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        logger.warning("MPS requested but unavailable; falling back to CPU.")
+        return torch.device("cpu")
+    if pref == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        logger.warning("CUDA requested but unavailable; falling back to CPU.")
+        return torch.device("cpu")
+    # "auto" (and any unknown value): CPU is fastest for this small workload.
     return torch.device("cpu")
 
 
@@ -33,8 +55,16 @@ class TrainingConfig:
     # Environment
     env: EnvConfig = field(default_factory=EnvConfig)
 
+    # Compute
+    # "auto" resolves to CPU: for this tiny net + small batches CPU beats MPS/CUDA.
+    device: str = "auto"
+
     # Rollout collection
-    n_workers: int = field(default_factory=lambda: max(1, (os.cpu_count() or 2) - 1))
+    # Leave ~2 cores free for the main process and the OS so the laptop stays
+    # responsive during training; more workers past this point mostly oversubscribe.
+    n_workers: int = field(
+        default_factory=lambda: max(1, min(8, (os.cpu_count() or 2) - 2))
+    )
     steps_per_worker: int = 2048
     hidden: int = 64
 
@@ -48,6 +78,9 @@ class TrainingConfig:
     n_epochs: int = 10
     lr: float = 3e-4
     max_grad_norm: float = 0.5
+    # Fixed minibatch size for the PPO update. 512 gives many gradient steps per
+    # rollout (good sample efficiency) while staying cheap on CPU.
+    mini_batch_size: int = 512
 
     # Training loop
     n_iterations: int = 300
@@ -105,8 +138,8 @@ class Trainer:
     def __init__(self, cfg: TrainingConfig | None = None) -> None:
         """Set up networks, optimizer, and device."""
         self.cfg = cfg or TrainingConfig()
-        self.device = _get_device()
-        logger.info(f"Training device: {self.device}")
+        self.device = _resolve_device(self.cfg.device)
+        logger.info(f"Training device: {self.device} (requested: {self.cfg.device})")
 
         self.actor = Actor(hidden=self.cfg.hidden).to(self.device)
         self.critic = Critic(hidden=self.cfg.hidden).to(self.device)
@@ -215,7 +248,8 @@ class Trainer:
                     )
 
                 batch = _merge_rollouts(results, cfg.gamma, cfg.lam, self.device)
-                n_mini = max(1, (cfg.n_workers * cfg.steps_per_worker) // 4)
+                n_total = cfg.n_workers * cfg.steps_per_worker
+                n_mini = max(1, min(cfg.mini_batch_size, n_total))
                 metrics = ppo_update(
                     self.actor,
                     self.critic,
