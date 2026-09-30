@@ -94,6 +94,5 @@ tasks:
       - rm -rf .ruff_cache
       - rm -rf build/
       - rm -rf dist/
-      - rm -rf checkpoints/
       - find . -name ".coverage*" -delete
       - find . -name "__pycache__" -exec rm -r {} +
