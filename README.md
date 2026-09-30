@@ -6,7 +6,8 @@
 
 PPO and TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
 
-![TQC policy swinging up and balancing both poles](docs/assets/tqc_swingup.gif)
+<img src="docs/assets/tqc_swingup.gif" alt="TQC policy swinging up and balancing both poles" width="900" height="522">
+
 *A trained TQC policy swinging up and balancing both links upright, cart re-centered — return 817.5 over the episode.*
 
 ## Install
@@ -69,18 +70,26 @@ task download-models                 # latest release
 task download-models -- models-v1    # a specific tag
 ```
 
-To cut a new release (requires the [GitHub CLI](https://cli.github.com/),
-authenticated with `gh auth login`): train locally as usual, then run
+To cut a new release: train locally as usual, then run
 
 ```bash
 task release-models -- models-v1
 ```
 
 which zips whatever's under `checkpoints/<single|double>/<ppo|tqc>/`
-(`task package-models` alone, if you just want the zips in `dist/` without
-tagging/publishing), tags and pushes `models-v1`, and runs
-`gh release create` to publish the zips it found — only the combinations you
-actually trained are included.
+(`task package-models` alone, if you just want the zips without
+tagging/publishing), tags and pushes `models-v1`, and creates the GitHub
+Release — only the combinations you actually trained are included.
+
+The last step requires the [GitHub CLI](https://cli.github.com/) (`gh auth login`).
+Without it, do the first two steps manually and upload via the web UI:
+
+```bash
+task package-models              # produces dist/*.zip
+git tag models-v1
+git push origin models-v1
+# then go to github.com/Tsmorz/n-cartpole/releases/new, pick the tag, and attach dist/*.zip
+```
 
 **Visualization.** Every view renders to a self-contained, interactive **Plotly**
 HTML page (hover, zoom, play/scrub) — no static PNGs. `task play` gives a scrub-able

@@ -5,8 +5,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from n_cartpole.env.cartpole import NPendulumCartpole, obs_dim, obs_mirror_sign, sysid_dim
 from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
+from n_cartpole.env.hardware_config import HardwareConfig
 
 
 @pytest.fixture()
@@ -151,3 +153,97 @@ def test_action_clipping() -> None:
     # Should not raise
     env.step(np.array([1000.0], dtype=np.float32))
     env.step(np.array([-1000.0], dtype=np.float32))
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers: obs_dim, sysid_dim, obs_mirror_sign
+# ---------------------------------------------------------------------------
+
+
+def test_obs_dim() -> None:
+    assert obs_dim(1) == 5
+    assert obs_dim(2) == 8
+    assert obs_dim(3) == 11
+
+
+def test_sysid_dim() -> None:
+    assert sysid_dim(1) == 5
+    assert sysid_dim(2) == 8
+
+
+def test_obs_mirror_sign_without_sysid() -> None:
+    signs = obs_mirror_sign(2)
+    assert signs.shape == (8,)
+    assert signs[0] == -1  # x flips
+    assert signs[2] == 1   # cos θ stays
+
+
+def test_obs_mirror_sign_with_sysid() -> None:
+    signs = obs_mirror_sign(2, with_sysid=True)
+    expected_len = obs_dim(2) + sysid_dim(2)
+    assert signs.shape == (expected_len,)
+    # sysid params are +1 (symmetric under mirroring)
+    assert np.all(signs[obs_dim(2):] == 1)
+
+
+def test_n_links_less_than_one_raises() -> None:
+    with pytest.raises(ValueError, match="n_links"):
+        NPendulumCartpole(EnvConfig(n_links=0))
+
+
+# ---------------------------------------------------------------------------
+# Hardware config integration
+# ---------------------------------------------------------------------------
+
+
+def _hw_config(delay_steps: int = 1, sensor_noise: float = 0.0) -> HardwareConfig:
+    return HardwareConfig(
+        physics=PhysicsParams(),
+        delay_steps=delay_steps,
+        sensor_noise_std=sensor_noise,
+    )
+
+
+def test_hardware_env_obs_shape() -> None:
+    cfg = EnvConfig(n_links=2, hardware=_hw_config())
+    env = NPendulumCartpole(cfg)
+    obs, _ = env.reset(seed=0)
+    expected = obs_dim(2) + sysid_dim(2)
+    assert obs.shape == (expected,)
+
+
+def test_hardware_env_reset_resamples_context() -> None:
+    cfg = EnvConfig(n_links=2, hardware=_hw_config())
+    env = NPendulumCartpole(cfg)
+    obs1, _ = env.reset(seed=0)
+    obs2, _ = env.reset(seed=99)
+    # sysID context (last sysid_dim entries) differs between resets with diff seeds
+    ctx1 = obs1[obs_dim(2):]
+    ctx2 = obs2[obs_dim(2):]
+    assert ctx1.shape == (sysid_dim(2),)
+    assert ctx2.shape == (sysid_dim(2),)
+
+
+def test_hardware_env_action_delay() -> None:
+    cfg = EnvConfig(n_links=2, hardware=_hw_config(delay_steps=2))
+    env = NPendulumCartpole(cfg)
+    env.reset(seed=0)
+    # Should complete without error through the delay buffer
+    for _ in range(5):
+        env.step(np.array([1.0], dtype=np.float32))
+
+
+def test_hardware_env_sensor_noise() -> None:
+    cfg = EnvConfig(n_links=1, hardware=_hw_config(sensor_noise=0.1))
+    env = NPendulumCartpole(cfg)
+    obs, _ = env.reset(seed=0)
+    # With noise the obs must still be finite
+    assert np.all(np.isfinite(obs))
+
+
+def test_hardware_env_no_delay_buffer() -> None:
+    cfg = EnvConfig(n_links=1, hardware=_hw_config(delay_steps=0))
+    env = NPendulumCartpole(cfg)
+    env.reset(seed=0)
+    obs, reward, *_ = env.step(np.array([0.0], dtype=np.float32))
+    assert obs.shape[0] == obs_dim(1) + sysid_dim(1)

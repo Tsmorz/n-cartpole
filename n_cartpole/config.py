@@ -18,6 +18,11 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from n_cartpole.training.off_policy import TQCConfig
+    from n_cartpole.training.trainer import TrainingConfig
 
 from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
@@ -70,7 +75,7 @@ def _env_from(data: dict) -> EnvConfig:
     )
 
 
-def load_ppo_config(path: str | Path) -> "TrainingConfig":
+def load_ppo_config(path: str | Path) -> TrainingConfig:
     """Construct a :class:`~n_cartpole.training.trainer.TrainingConfig` from TOML."""
     # Import here to avoid circular deps at module level.
     from n_cartpole.training.trainer import TrainingConfig
@@ -111,7 +116,7 @@ def load_ppo_config(path: str | Path) -> "TrainingConfig":
     )
 
 
-def load_tqc_config(path: str | Path) -> "TQCConfig":
+def load_tqc_config(path: str | Path) -> TQCConfig:
     """Construct a :class:`~n_cartpole.training.off_policy.TQCConfig` from TOML."""
     from n_cartpole.training.off_policy import TQCConfig
 

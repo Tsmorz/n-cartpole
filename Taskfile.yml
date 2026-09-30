@@ -67,15 +67,10 @@ tasks:
     cmds:
       - uv run python scripts/plot_returns.py {{.CLI_ARGS}}
 
-  policy-map:
-    desc: "Visualize the policy input→output map; args: task policy-map -- --x theta1 --y theta1dot"
-    cmds:
-      - uv run python scripts/policy_map.py {{.CLI_ARGS}}
-
   test:
     desc: Run the test suite with coverage
     cmds:
-      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --no-cov-on-fail
+      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --no-cov-on-fail --cov-fail-under=90
 
   format:
     desc: Format, lint, and type-check the code

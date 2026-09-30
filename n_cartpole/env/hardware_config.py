@@ -8,7 +8,7 @@ you can set them to zero if you trust your measurements.
 
 ``delay_steps`` and ``sensor_noise_std`` model the hardware pipeline rather
 than the pendulum mechanics.  Action delay is the number of 100 Hz control
-steps between issuing a command and the actuator applying it (typically 1–2
+steps between issuing a command and the actuator applying it (typically 1-2
 steps for an ESP32 over USB/UART).  Sensor noise is the Gaussian std-dev added
 to each observation dimension to match encoder / IMU noise floor.
 
@@ -49,7 +49,7 @@ class HardwareConfig:
     joint_friction_noise: float = 0.0005
 
     # Number of control loop steps between issuing a command and the actuator
-    # applying it.  At 100 Hz, 1 step = 10 ms.  Typical for ESP32 USB/UART: 1–2.
+    # applying it.  At 100 Hz, 1 step = 10 ms.  Typical for ESP32 USB/UART: 1-2.
     delay_steps: int = 1
 
     # Gaussian std dev added independently to each observation dimension to

@@ -61,7 +61,7 @@ class EnvConfig:
 
 
 def obs_dim(n_links: int) -> int:
-    """Base kinematic observation width: ``[x, ẋ]`` + ``[cos, sin, θ̇]`` per link."""
+    """Return base kinematic observation width: ``[x, ẋ]`` + ``[cos, sin, θ̇]`` per link."""
     return 2 + 3 * n_links
 
 
@@ -150,7 +150,7 @@ class NPendulumCartpole(gym.Env):
 
         On top of that, a potential-based shaping term rewards *progress* toward
         upright every step, using ``r_angle`` as the potential Φ(s) (Ng, Harada &
-        Russell, ICML 1999): ``F(s,s') = γ·Φ(s') − Φ(s)``. This is provably
+        Russell, ICML 1999): ``F(s,s') = g*P(s') - P(s)``. This is provably
         policy-invariant but makes swing-up happen sooner during training. It can
         push the total slightly negative (to ``-SHAPING_WEIGHT``) when alignment
         regresses; the reward stays in a small fixed range regardless.
@@ -295,17 +295,15 @@ class NPendulumCartpole(gym.Env):
         if hw is not None and self._sysid_context is not None:
             obs = np.concatenate([obs, self._sysid_context])
         if hw is not None and hw.sensor_noise_std > 0.0:
-            obs = (
-                obs
-                + self.np_random.normal(0.0, hw.sensor_noise_std, obs.shape).astype(
-                    np.float32
-                )
-            )
+            obs = obs + self.np_random.normal(
+                0.0, hw.sensor_noise_std, obs.shape
+            ).astype(np.float32)
         return obs
 
     def _angle_potential(self, state: np.ndarray) -> float:
-        """Upright-alignment product over links, in [0, 1]; used as the shaping
-        potential Φ(s) as well as the base reward's ``r_angle`` factor.
+        """Upright-alignment product over links, in [0, 1].
+
+        Used as the shaping potential and the base reward's ``r_angle`` factor.
         """
         theta = np.asarray(state)[2::2]
         return float(np.prod(0.5 + 0.5 * np.cos(theta)))
@@ -337,7 +335,7 @@ class NPendulumCartpole(gym.Env):
 
         base = r_angle * r_pos * r_vel * r_act
 
-        # Potential-based shaping (Ng et al. 1999): F(s,s') = γ·Φ(s') − Φ(s), with
+        # Potential-based shaping (Ng et al. 1999): F(s,s') = g*P(s') - P(s), with
         # Φ = r_angle. Rewards progress toward upright every step instead of only
         # at the top, without changing the optimal policy.
         shaping = self.SHAPING_GAMMA * r_angle - self._prev_potential
