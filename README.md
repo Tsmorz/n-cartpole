@@ -111,6 +111,10 @@ is labeled with one letter per link, base link first:
 | `UD` | up            | down         | no — actively balanced       |
 | `DD` | down          | down         | yes — policy damps the swing |
 
+<img src="docs/assets/tqc_goal_transitions.gif" alt="Goal-conditioned TQC policy transitioning DD → UU → DU → UD → UU → DD" width="600">
+
+*One goal-conditioned network commanded through `UU@0, DU@6, UD@12, UU@18, DD@24` from the hanging-down start; every transition was reached.*
+
 That gives 12 transitions plus 4 "hold" cases, all learned by the same network.
 The target configuration is an extra input to the policy (±1 per link), and the
 reward measures closeness to that target instead of to upright.
