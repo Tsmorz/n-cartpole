@@ -1,0 +1,135 @@
+# Default configuration for n-cartpole training and deployment.
+#
+# This is the single source of truth for all physical parameters, environment
+# settings, and training hyperparameters.  Edit here; do not scatter defaults
+# across Python files.
+#
+# Load in Python:
+#   from n_cartpole.config import load_ppo_config, load_tqc_config
+#   ppo_cfg = load_ppo_config("config/default.toml")
+#   tqc_cfg = load_tqc_config("config/default.toml")
+#
+# Pass to the CLI:
+#   task train   -- --config config/default.toml
+#   task train-tqc -- --config config/default.toml
+
+
+# =============================================================================
+# Physics — simulation model parameters
+# =============================================================================
+# These define the simulated plant.  They are the "true" params the dynamics
+# engine uses.  For pure simulation training they are also the nominal values
+# shown to the network (with noise) via the sysID context.
+[physics]
+M            = 1.00     # cart mass (kg)
+g            = 9.81     # gravitational acceleration (m/s²)
+dt           = 0.01     # control timestep (s) — must match your loop rate
+force_max    = 20.0     # actuator force limit (N)
+x_lim        = 0.50     # rail half-length (m)
+b            = 0.10     # cart viscous friction (N·s/m)
+masses       = [0.20, 0.15]   # bob masses per link (kg); scalar = shared
+lengths      = 0.25           # rod lengths per link (m); scalar = shared
+joint_friction = 0.002        # joint friction per link (N·m·s/rad); scalar = shared
+
+
+# =============================================================================
+# Environment
+# =============================================================================
+[env]
+n_links          = 2       # pendulum link count (1 = single, 2 = double, …)
+max_steps        = 1000    # episode length limit (steps)
+init_noise       = 0.05    # perturbation around hanging-down start (rad / m)
+init_random_prob = 0.30    # fraction of resets that use a fully random state
+init_vel_noise   = 2.0     # velocity range for random resets (rad/s, m/s)
+
+
+# =============================================================================
+# Hardware — real rig parameters (comment out entire section to disable sysID)
+# =============================================================================
+# When this section is present, the env appends a sysID context vector to
+# every observation and models action latency + sensor noise.  The context is
+# the measured nominal params below, perturbed by the noise stds each episode.
+#
+# Measurement guidance:
+#   M, masses  : bench scale (±1 g → noise ≈ 0.001)
+#   lengths    : steel ruler (±0.5 mm → noise ≈ 0.0005)
+#   b          : free-deceleration fit (rough ±30 %)
+#   friction   : free-oscillation decay fit (rough ±30 %)
+#   delay_steps: measure your control loop round-trip; ESP32 USB/UART at 100 Hz
+#                is typically 1–2 steps (10–20 ms)
+[hardware.physics]
+M              = 1.00
+g              = 9.81
+dt             = 0.01
+force_max      = 20.0
+x_lim          = 0.50
+b              = 0.10
+masses         = [0.20, 0.15]
+lengths        = 0.25
+joint_friction = 0.002
+
+[hardware.noise]
+M_noise              = 0.050    # cart mass (kg)
+b_noise              = 0.030    # cart viscous friction (N·s/m)
+masses_noise         = 0.005    # per-link bob mass (kg)
+lengths_noise        = 0.005    # per-link rod length (m)
+joint_friction_noise = 0.0005   # per-link joint friction (N·m·s/rad)
+
+[hardware.pipeline]
+delay_steps      = 1      # steps between command and actuation (1 step = 10 ms)
+sensor_noise_std = 0.0    # Gaussian std added to each obs dim (set > 0 for noisy sensors)
+
+
+# =============================================================================
+# PPO training
+# =============================================================================
+[ppo]
+device           = "auto"  # "auto" → CPU (fastest for this tiny net)
+n_workers        = 0       # 0 = auto (cpu_count - 2, capped at 8)
+steps_per_worker = 2048
+hidden           = 256
+blocks           = 2       # SimBa residual blocks per network
+
+gamma              = 0.99
+lam                = 0.95
+clip_eps           = 0.20
+value_clip_eps     = 0.20
+entropy_coeff_start = 0.0
+entropy_coeff_end   = 0.0
+log_std_init        = 1.6   # initial policy std in force units; log(5)≈1.6 → ~5 N
+n_epochs            = 10
+lr                  = 3e-4
+max_grad_norm       = 0.5
+mini_batch_size     = 512
+normalize_returns   = true
+symmetry_augment    = true
+target_kl           = 0.03
+
+n_iterations     = 300
+checkpoint_every = 50
+log_every        = 10
+
+
+# =============================================================================
+# TQC training
+# =============================================================================
+[tqc]
+device    = "auto"
+hidden    = 256
+blocks    = 2
+n_critics = 2
+n_quantiles           = 25
+top_quantiles_to_drop = 2
+
+gamma            = 0.99
+tau              = 0.005   # soft target update rate
+lr               = 3e-4
+batch_size       = 256
+buffer_size      = 1_000_000
+start_steps      = 5_000
+updates_per_step = 1
+symmetry_augment = true
+
+total_steps      = 200_000
+checkpoint_every = 25_000
+log_every        = 5_000
