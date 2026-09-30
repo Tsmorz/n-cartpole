@@ -1,7 +1,7 @@
 # n-cartpole
 
 [![CI](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 PPO policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
@@ -51,6 +51,10 @@ Critics) is the off-policy, distributional actor-critic that Lee et al. used for
 real multi-pendulum hardware — far more sample-efficient. Both share the
 environment, the bounded reward, symmetric data augmentation, and the diverse
 initial-state distribution described below.
+
+![TQC policy swinging up and balancing both poles](docs/assets/tqc_swingup.gif)
+*A TQC policy swinging up and balancing (`task play -- --checkpoint checkpoints/tqc_latest.pt`):
+both links reach upright, cart re-centers, return 817.5 over the episode.*
 
 > **Device note:** the networks are small (8→64→64 MLPs), so the whole run is
 > fastest on CPU — GPU per-op dispatch overhead outweighs the tiny matmuls, and
