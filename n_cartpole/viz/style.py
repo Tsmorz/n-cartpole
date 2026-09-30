@@ -1,16 +1,20 @@
 """Shared visual style for all figures — one design system, built on Plotly.
 
-Centralizing the palette here keeps the training dashboard, the episode replay,
-and the policy map reading as one system. Colors are the validated
-categorical / ink / status slots from the data-viz reference palette (CVD-checked
-in fixed order — never cycled); pulling a color means naming the *role* it plays.
+The palette mirrors the light theme of the personal site
+(``personal-site/assets/css/main.css``), so the training dashboard and the
+episode replay read like the browser demo. Pulling a color means naming the
+*role* it plays.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+# --- Brand ------------------------------------------------------------------
+ACCENT = "#0d7a75"  # --accent (teal): cart, cart position, "good"
+
 # --- Categorical series (fixed order; assign by slot, never cycle) -----------
+# Slots 1-4 are the site's --viz-1..4; the rest extend the set for dashboards.
 SERIES: tuple[str, ...] = (
     "#2a78d6",  # 1 blue
     "#eb6834",  # 2 orange
@@ -23,46 +27,46 @@ SERIES: tuple[str, ...] = (
 )
 
 # --- Ink / chrome ------------------------------------------------------------
-INK = "#0b0b0b"  # primary text
-INK_2 = "#52514e"  # secondary text
-MUTED = "#898781"  # axis labels / de-emphasized marks
-GRID = "#e1e0d9"  # hairline gridlines
-BASELINE = "#c3c2b7"  # zero line / axis spine
-SURFACE = "#fcfcfb"  # chart surface
-PAGE = "#f9f9f7"  # page plane behind the chart
+INK = "#14181d"  # --text: primary text, rods
+INK_2 = "#5b636d"  # --text-muted: secondary text
+MUTED = "#8a929c"  # axis labels / de-emphasized marks
+GRID = "#e3e6ea"  # --border: hairline gridlines
+BASELINE = "#cfd4da"  # --border-strong: zero line / axis spine / rail
+SURFACE = "#f5f6f8"  # --bg-soft: plot / scene surface
+PAGE = "#ffffff"  # --bg: page plane behind the chart
 
 # --- Status (reserved — never reused as a series) ----------------------------
-GOOD = "#0ca30c"
-WARNING = "#fab219"
-CRITICAL = "#d03b3b"
+GOOD = ACCENT
+WARNING = "#eda100"
+CRITICAL = "#c9524b"  # --nn-act-neg
 
 # --- Semantic roles used across the cartpole figures -------------------------
 POLE1 = SERIES[0]  # first link — blue
 POLE2 = SERIES[1]  # second link — orange
-CART = "#3a3a38"  # the cart body: a neutral dark, not a data series
-FORCE = SERIES[6]  # applied force — violet (distinct from the link hues)
+CART = ACCENT  # the cart body
+FORCE = SERIES[3]  # applied force — yellow
 REWARD = SERIES[2]  # per-step reward — aqua
 LIMIT = CRITICAL  # rail / force limits
 
-# Diverging ramp for signed fields (e.g. force output): red ← neutral → blue.
-# Blue = push right (+F), red = push left (-F); gray reads as "do nothing".
+# Diverging ramp for signed fields (e.g. force output): red <- neutral -> teal.
 DIVERGING = [
-    [0.0, "#d03b3b"],
-    [0.25, "#eb9d8c"],
-    [0.5, "#f0efec"],
-    [0.75, "#86b6ef"],
-    [1.0, "#184f95"],
+    [0.0, "#c9524b"],
+    [0.25, "#e2a5a1"],
+    [0.5, "#d3d8de"],
+    [0.75, "#7fbdb9"],
+    [1.0, "#0d7a75"],
 ]
-# Sequential ramp for magnitude fields (e.g. value function): light → dark blue.
+# Sequential ramp for magnitude fields (e.g. value function): light -> dark teal.
 SEQUENTIAL = [
-    [0.0, "#cde2fb"],
-    [0.25, "#9ec5f4"],
-    [0.5, "#5598e7"],
-    [0.75, "#2a78d6"],
-    [1.0, "#104281"],
+    [0.0, "#d9efed"],
+    [0.25, "#a5d6d2"],
+    [0.5, "#5fb1ab"],
+    [0.75, "#0d7a75"],
+    [1.0, "#084744"],
 ]
 
-_FONT = "-apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+FONT = '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif'
+MONO = '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace'
 
 
 def link_color(k: int) -> str:
@@ -92,8 +96,8 @@ def base_layout(**overrides: Any) -> dict[str, Any]:
     layout: dict[str, Any] = {
         "paper_bgcolor": PAGE,
         "plot_bgcolor": SURFACE,
-        "font": {"family": _FONT, "color": INK_2, "size": 13},
-        "title": {"font": {"family": _FONT, "color": INK, "size": 18}, "x": 0.02},
+        "font": {"family": FONT, "color": INK_2, "size": 13},
+        "title": {"font": {"family": FONT, "color": INK, "size": 18}, "x": 0.02},
         "legend": {"bgcolor": "rgba(0,0,0,0)"},
         "margin": {"l": 60, "r": 24, "t": 60, "b": 48},
     }
@@ -114,6 +118,7 @@ def style_axes(fig: Any) -> None:
         ticks="outside",
         tickcolor=BASELINE,
         ticklen=4,
+        tickfont={"family": MONO, "size": 10},
     )
     fig.update_yaxes(
         showgrid=True,
@@ -126,4 +131,5 @@ def style_axes(fig: Any) -> None:
         ticks="outside",
         tickcolor=BASELINE,
         ticklen=4,
+        tickfont={"family": MONO, "size": 10},
     )

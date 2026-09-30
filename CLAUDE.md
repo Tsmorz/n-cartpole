@@ -22,6 +22,7 @@ task play -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --start DD -
 task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt   # interactive HTML replay (auto link count)
 task plot -- --csv checkpoints/double/tqc/metrics.csv            # interactive training dashboard
 task policy-map -- --checkpoint checkpoints/double/tqc/tqc_latest.pt  # input→output force/value control-surface map
+task export-web                                 # swing-up actor → ../personal-site/assets/models/ (browser demo; see below)
 task format                                     # ruff format + ruff check --fix + mypy
 task test                                       # pytest with coverage over n_cartpole/
 task ci                                         # format + test (local CI mirror)
@@ -33,6 +34,8 @@ The only learner is **TQC** (`scripts/train.py`, `training/off_policy.py`, `poli
 **Checkpoint naming and layout**: checkpoints live under `checkpoints/<single|double>/<tqc|tqc-goal>/`, chosen automatically from `--links`/`--goals` (override with `--checkpoint-dir`). Filenames are `tqc_latest.pt` and `tqc_NNNNNNN.pt`. Every checkpoint embeds its full `TQCConfig` (including `env.n_links`) plus an `"algo": "tqc"` key, so `policy/loader.py::load_policy()` and therefore `scripts/play.py` / `scripts/policy_map.py` reconstruct the right network shape (`n_cartpole/env/factory.py::env_spec()`) from the checkpoint alone — replay and the policy map work for any checkpoint regardless of which folder it's opened from. `policy/tqc.py`'s `SquashedGaussianActor`/`QuantileCritic` take an `obs_dim` override for this (default 8, for backward compatibility with pre-existing double-link checkpoints and `tests/test_tqc.py`).
 
 **Publishing checkpoints**: `checkpoints/` is gitignored — never commit `.pt` files, and nothing trains in CI (no GitHub Actions workflow does model training; `ci.yml` only runs lint/tests). Pretrained models are distributed via GitHub Releases, built entirely locally via Taskfile targets: `task package-models` zips whatever exists under `checkpoints/<single|double>/<tqc|tqc-goal>/` into `dist/{single,double}-{tqc,tqc-goal}.zip` (skipping combinations that haven't been trained — see the guard in `Taskfile.yml`), and `task release-models -- <tag>` runs that, then `git tag`/`git push`, then `gh release create <tag> dist/*.zip --generate-notes` (requires the `gh` CLI, authenticated). `task download-models [-- <tag>]` reverses it: `gh release download` + unzip back into `checkpoints/`. If you change the checkpoint directory convention (`scripts/train.py`'s `--checkpoint-dir` default), update `package-models`'s `for links in single double; for algo in tqc tqc-goal` loop in `Taskfile.yml` to match.
+
+**Browser export** (`scripts/export_web.py`, `task export-web`): writes `swingup-tqc.{json,bin}` + `swingup-tqc-fixture.json` for the personal site's `/controls/swingup/` page, which runs the actor in vanilla JS. The JSON carries the checkpoint's `PhysicsParams`, `force_slew`, and success tolerances — the page reads physics from it, so the browser plant always matches training. The `.bin` is float16 with `RunningNorm` folded into `in_proj` and only the mean row of `out_proj`. Plain swing-up checkpoints only (no `--goals`, no `hardware`). If you change `dynamics.py`, the obs encoding, the SimBa block, or the actuator (slew/clip), port the change to `personal-site/assets/js/swingup.js` too and re-export — the site's `script/test-swingup` (net/physics parity + closed-loop swing-up against the fixture) is what catches drift.
 
 Run a single test:
 ```bash
@@ -71,6 +74,7 @@ scripts/
   plot_returns.py       — metrics.csv/returns.csv → interactive training dashboard (task plot)
   policy_map.py         — checkpoint → input→output control-surface map (task policy-map)
   eval_transitions.py   — goal-conditioned checkpoint → start×goal success matrix (task eval-transitions)
+  export_web.py         — swing-up checkpoint → float16 weights + physics JSON + parity fixture for the website (task export-web)
 tests/
   test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD (2-link)
   test_env.py           — gym API contract, obs shape, bounded reward, termination (double)

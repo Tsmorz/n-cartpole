@@ -113,7 +113,7 @@ def animate_episode(
     panels.append(
         {
             "title": "Cart position (m)",
-            "series": [("x", states[:, 0], style.SERIES[2])],
+            "series": [("x", states[:, 0], style.ACCENT)],
             "t": t,
             "range": None,
             "limit": p.x_lim,
@@ -165,7 +165,7 @@ def animate_episode(
         x1=track_half,
         y0=0,
         y1=0,
-        line={"color": style.BASELINE, "width": 2},
+        line={"color": style.BASELINE, "width": 4},
         row=1,
         col=1,
     )
@@ -174,10 +174,9 @@ def animate_episode(
             type="line",
             x0=xr,
             x1=xr,
-            y0=-0.12,
-            y1=reach,
-            line={"color": style.LIMIT, "width": 1, "dash": "dash"},
-            opacity=0.6,
+            y0=-0.1,
+            y1=0.1,
+            line={"color": style.INK_2, "width": 5},
             row=1,
             col=1,
         )
@@ -189,12 +188,30 @@ def animate_episode(
     # Animated physical traces (order fixed → referenced in frames by index).
     fig.add_trace(
         go.Scatter(
+            x=[xs0[0], xs0[0]],
+            y=[0, reach - 0.1],
+            mode="lines",
+            line={
+                "color": style.rgba(style.ACCENT, 0.35),
+                "width": 1,
+                "dash": "dash",
+            },
+            hoverinfo="skip",
+            showlegend=False,
+            name="upright",
+        ),
+        row=1,
+        col=1,
+    )
+    idx_upright = len(fig.data) - 1
+    fig.add_trace(
+        go.Scatter(
             x=cxs,
             y=cys,
             mode="lines",
             fill="toself",
-            fillcolor=style.CART,
-            line={"color": style.CART, "width": 1},
+            fillcolor=style.ACCENT,
+            line={"color": style.ACCENT, "width": 1},
             hoverinfo="skip",
             showlegend=False,
             name="cart",
@@ -203,17 +220,20 @@ def animate_episode(
         col=1,
     )
     idx_cart = len(fig.data) - 1
-    # One trace per link (thinner/smaller markers for outer links).
+    # One trace per link: dark rod, hollow pivot dot, colored bob at the tip.
     idx_poles: list[int] = []
     for k in range(n_links):
-        color = style.link_color(k)
         fig.add_trace(
             go.Scatter(
                 x=[xs0[k], xs0[k + 1]],
                 y=[ys0[k], ys0[k + 1]],
                 mode="lines+markers",
-                line={"color": color, "width": max(3, 6 - k)},
-                marker={"size": max(5, 9 - k), "color": color},
+                line={"color": style.INK, "width": 4},
+                marker={
+                    "size": [6, max(12, 18 - 2 * k)],
+                    "color": [style.SURFACE, style.link_color(k)],
+                    "line": {"width": 0},
+                },
                 hoverinfo="skip",
                 showlegend=False,
                 name=f"link {k + 1}",
@@ -246,7 +266,7 @@ def animate_episode(
                 y0=band[0],
                 y1=band[1],
                 line_width=0,
-                fillcolor=style.rgba(style.GOOD, 0.10),
+                fillcolor=style.rgba(style.ACCENT, 0.12),
                 row=row,
                 col=2,
             )
@@ -277,7 +297,7 @@ def animate_episode(
             for lim in (-pl["limit"], pl["limit"]):
                 fig.add_hline(
                     y=lim,
-                    line={"color": style.LIMIT, "width": 1, "dash": "dash"},
+                    line={"color": style.CRITICAL, "width": 1, "dash": "dash"},
                     opacity=0.6,
                     row=row,
                     col=2,
@@ -312,14 +332,17 @@ def animate_episode(
     if frame_ids[-1] != T - 1:
         frame_ids.append(T - 1)
 
-    animated = [idx_cart, *idx_poles]
+    animated = [idx_upright, idx_cart, *idx_poles]
     animated += cursor_idx
 
     frames = []
     for fi in frame_ids:
         xs, ys = _joint_coords(states[fi], p, n_links)
         cxs, cys = _cart_shape(xs[0], cart_w, cart_h)
-        data = [go.Scatter(x=cxs, y=cys)]
+        data = [
+            go.Scatter(x=[xs[0], xs[0]], y=[0, reach - 0.1]),
+            go.Scatter(x=cxs, y=cys),
+        ]
         for k in range(n_links):
             data.append(go.Scatter(x=[xs[k], xs[k + 1]], y=[ys[k], ys[k + 1]]))
         tt = float(fi * dt)
@@ -332,7 +355,15 @@ def animate_episode(
     frame_ms = max(10, int(dt * 1000 / max(speed, 1e-6)))
     fig.update_layout(
         **style.base_layout(
-            title={"text": title or f"Episode replay · {n_links}-link cartpole"},
+            title={
+                "text": title or f"Episode replay · {n_links}-link cartpole",
+                "font": {
+                    "family": style.FONT,
+                    "color": style.INK,
+                    "size": 18,
+                },
+                "x": 0.02,
+            },
             height=max(560, 175 * n_panels + 90),
             showlegend=True,
             legend={
@@ -390,7 +421,11 @@ def animate_episode(
                     "currentvalue": {
                         "prefix": "t = ",
                         "suffix": " s",
-                        "font": {"color": style.INK},
+                        "font": {
+                            "color": style.INK,
+                            "family": style.MONO,
+                            "size": 12,
+                        },
                     },
                     "steps": [
                         {
@@ -410,9 +445,25 @@ def animate_episode(
             ],
         )
     )
-    style.style_axes(fig)
-    fig.update_xaxes(showgrid=False, zeroline=False, row=1, col=1)
-    fig.update_yaxes(showgrid=False, zeroline=False, row=1, col=1)
+    axis = {
+        "showgrid": True,
+        "gridcolor": style.GRID,
+        "zeroline": False,
+        "linecolor": style.BASELINE,
+        "tickcolor": style.BASELINE,
+        "ticks": "outside",
+        "ticklen": 4,
+        "tickfont": {"family": style.MONO, "size": 10},
+    }
+    fig.update_xaxes(**axis)
+    fig.update_yaxes(**axis)
+    fig.update_annotations(font={"family": style.FONT, "color": style.INK, "size": 13})
+    fig.update_xaxes(
+        showgrid=False, zeroline=False, showticklabels=False, ticks="", row=1, col=1
+    )
+    fig.update_yaxes(
+        showgrid=False, zeroline=False, showticklabels=False, ticks="", row=1, col=1
+    )
 
     if save_path is not None:
         save_path = Path(save_path).with_suffix(".html")

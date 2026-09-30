@@ -25,9 +25,9 @@ def parse_args() -> argparse.Namespace:
         help="Goal-conditioned checkpoint (trained with --goals)",
     )
     parser.add_argument(
-        "--seconds", type=float, default=8.0, help="Time budget per transition"
+        "--seconds", type=float, default=10.0, help="Time budget per transition"
     )
-    parser.add_argument("--trials", type=int, default=3, help="Episodes per pair")
+    parser.add_argument("--trials", type=int, default=5, help="Episodes per pair")
     parser.add_argument("--seed", type=int, default=0, help="Base random seed")
     return parser.parse_args()
 

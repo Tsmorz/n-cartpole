@@ -27,7 +27,7 @@ _PANELS: dict[str, tuple[str, str, str]] = {
     "approx_kl": ("Approx. KL", "KL / update", style.SERIES[3]),
     "clip_fraction": ("Clip fraction", "fraction", style.SERIES[4]),
     # Goal-conditioned runs only (empty/NaN otherwise, and then not drawn).
-    "goal_success": ("Transition success", "fraction", style.SERIES[5]),
+    "goal_success": ("Transition success", "fraction", style.ACCENT),
 }
 
 
@@ -199,10 +199,12 @@ def plot_training_curves(
         **style.base_layout(
             title={"text": title},
             height=280 * nrows + 80,
-            legend={
+            margin={"l": 60, "r": 24, "t": 90, "b": 48},
+            legend={  # top margin, level with the title — clear of subplot titles
                 "orientation": "h",
-                "yanchor": "bottom",
-                "y": 1.02,
+                "yref": "container",
+                "yanchor": "top",
+                "y": 0.99,
                 "xanchor": "right",
                 "x": 1,
             },
