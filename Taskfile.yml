@@ -27,6 +27,11 @@ tasks:
     cmds:
       - uv run python scripts/eval_transitions.py {{.CLI_ARGS}}
 
+  eval-swingup:
+    desc: "Time a swing-up policy from randomized low-energy near-hanging starts; args: task eval-swingup -- --checkpoint checkpoints/double/tqc/tqc_latest.pt --trials 10"
+    cmds:
+      - uv run python scripts/eval_swingup.py {{.CLI_ARGS}}
+
   package-models:
     desc: "Zip locally trained checkpoints/<links>/<algo>/ into dist/*.zip"
     cmds:

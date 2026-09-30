@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/github/Tsmorz/n-cartpole/badge.svg?branch=main)](https://coveralls.io/github/Tsmorz/n-cartpole?branch=main)
-[![Python](https://img.shields.io/badge/python-3.13%20%7C%203.14-blue.svg)](https://www.python.org/)
+[![Python](<https://img.shields.io/badge/python-3.13%20%7C%203.14-blue.svg>)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
@@ -34,9 +34,6 @@ task play -- --checkpoint checkpoints/single/tqc/tqc_latest.pt
 
 # interactive training dashboard from a metrics.csv
 task plot -- --csv checkpoints/double/tqc/metrics.csv
-
-# the policy's input→output map: force (and value) over two state dims + slider
-task policy-map -- --checkpoint checkpoints/double/tqc/tqc_latest.pt --x theta1 --y theta1dot --slider theta2
 ```
 
 **Checkpoint layout.** Checkpoints are organized `checkpoints/<single|double>/<tqc|tqc-goal>/`,
@@ -107,12 +104,12 @@ With `--goals`, one network learns to move between every up/down configuration
 and to switch between them on command, not just to swing up. Each configuration
 is labeled with one letter per link, base link first:
 
-| Label | Link 1 (base) | Link 2 (tip) | Passively stable? |
-|---|---|---|---|
-| `UU` | up | up | no — actively balanced |
-| `DU` | down | up | no — actively balanced |
-| `UD` | up | down | no — actively balanced |
-| `DD` | down | down | yes — policy damps the swing |
+| Label  | Link 1 (base) | Link 2 (tip) | Passively stable?             |
+| ------ | ------------- | ------------ | ----------------------------- |
+| `UU` | up            | up           | no — actively balanced       |
+| `DU` | down          | up           | no — actively balanced       |
+| `UD` | up            | down         | no — actively balanced       |
+| `DD` | down          | down         | yes — policy damps the swing |
 
 That gives 12 transitions plus 4 "hold" cases, all learned by the same network.
 The target configuration is an extra input to the policy (±1 per link), and the
@@ -137,21 +134,21 @@ input.
 
 ## Development
 
-| Command | Description |
-|---|---|
-| `task init` | Create virtual environment and install deps |
-| `task train` | Train the TQC policy (`--links {1,2}`, `--goals`) |
-| `task play` | Interactive HTML replay of a trained policy (`--goals` schedule for goal-conditioned checkpoints) |
-| `task eval-transitions` | Start × goal success table for a goal-conditioned checkpoint |
-| `task download-models` | Download a models release into `checkpoints/` |
-| `task package-models` | Zip local checkpoints into `dist/` |
-| `task release-models` | Package, tag, and publish local checkpoints as a GitHub Release |
-| `task plot` | Interactive training dashboard from `metrics.csv` |
-| `task policy-map` | Interactive input→output (force/value) control-surface map |
-| `task test` | Run tests with coverage |
-| `task format` | Ruff format + lint + mypy |
-| `task ci` | Full local CI (format + test) |
-| `task clean` | Remove venv, caches, checkpoints |
+| Command                   | Description                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `task init`             | Create virtual environment and install deps                                                         |
+| `task train`            | Train the TQC policy (`--links {1,2}`, `--goals`)                                               |
+| `task play`             | Interactive HTML replay of a trained policy (`--goals` schedule for goal-conditioned checkpoints) |
+| `task eval-transitions` | Start × goal success table for a goal-conditioned checkpoint                                       |
+| `task download-models`  | Download a models release into`checkpoints/`                                                      |
+| `task package-models`   | Zip local checkpoints into`dist/`                                                                 |
+| `task release-models`   | Package, tag, and publish local checkpoints as a GitHub Release                                     |
+| `task plot`             | Interactive training dashboard from`metrics.csv`                                                  |
+| `task policy-map`       | Interactive input→output (force/value) control-surface map                                         |
+| `task test`             | Run tests with coverage                                                                             |
+| `task format`           | Ruff format + lint + mypy                                                                           |
+| `task ci`               | Full local CI (format + test)                                                                       |
+| `task clean`            | Remove venv, caches, checkpoints                                                                    |
 
 ## System
 
