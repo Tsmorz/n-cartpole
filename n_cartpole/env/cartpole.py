@@ -38,7 +38,13 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from n_cartpole.env.dynamics import PhysicsParams, step
+from n_cartpole.env.dynamics import (
+    PhysicsParams,
+    energy_range,
+    goal_energy,
+    step,
+    total_energy_batch,
+)
 from n_cartpole.env.goals import (
     FROM_OTHER,
     TransitionStats,
@@ -49,6 +55,38 @@ from n_cartpole.env.goals import (
 
 if TYPE_CHECKING:
     from n_cartpole.env.hardware_config import HardwareConfig
+    from n_cartpole.env.randomization import PlantRandomization
+
+
+@dataclass
+class RewardShape:
+    """Optional reward terms for fast, steady, in-bounds goal transitions.
+
+    ``EnvConfig.reward_shape = None`` (the default) is the original reward exactly;
+    every term here is off at its zero weight. All terms are even in ``x`` and the
+    velocities, so left-right mirror symmetry is preserved.
+
+    - ``energy_weight``: potential-based shaping on the gap between the rig's
+      mechanical energy and the goal pose's energy, faded out by ``1 - r_angle``.
+      The angle potential is flat (zero value *and* slope) at hanging-down for any
+      goal with an upright link; the energy gap is not, so pumping energy pays from
+      the first swing. Being potential-based it does not change the optimal policy.
+    - ``wall_weight`` / ``wall_start``: a factor on the reward that falls off
+      quadratically once ``|x|`` passes ``wall_start`` of the rail half-length, so
+      transitions stay clear of the end-stops (termination alone is too late).
+    - ``effort_weight`` / ``effort_scale``: a hold-gated force penalty
+      ``1 - w r_angle (1 - exp(-(F/scale)^2))`` — free while transitioning, costly
+      once at the goal, so holds are quiet.
+    - ``vel_k``: coefficient of the hold-gated joint-speed penalty
+      ``exp(-vel_k sum thd^2)`` (the original reward uses 0.1).
+    """
+
+    energy_weight: float = 0.0
+    wall_weight: float = 0.0
+    wall_start: float = 0.7
+    effort_weight: float = 0.0
+    effort_scale: float = 2.0
+    vel_k: float = 0.1
 
 
 @dataclass
@@ -79,6 +117,12 @@ class EnvConfig:
     # context vector to every observation and models action latency / sensor
     # noise.  Leave as None for pure simulation training without sysID.
     hardware: HardwareConfig | None = None
+    # Optional per-episode randomization of the TRUE plant (masses, lengths,
+    # friction, actuator gain) around ``physics``; None = always nominal. Rewards,
+    # shaping and replay relabeling keep using the nominal ``physics``.
+    randomize: PlantRandomization | None = None
+    # Optional extra reward terms (see ``RewardShape``); None = original reward.
+    reward_shape: RewardShape | None = None
 
     # Goal-conditioned transitions between equilibria (see module docstring).
     # False keeps the original all-upright swing-up task and observation.
@@ -167,11 +211,13 @@ def base_reward(
     dF_cmd: np.ndarray | float,
     goal: np.ndarray,
     physics: PhysicsParams,
+    shape: RewardShape | None = None,
 ) -> np.ndarray:
     """Bounded multiplicative reward in (0, 1] toward ``goal`` (vectorized).
 
     ``state`` is ``(..., 2 + 2n)``; ``F``/``dF_cmd`` broadcast against the
-    leading dims; ``goal`` is ``(n,)`` or ``(..., n)`` target angles.
+    leading dims; ``goal`` is ``(n,)`` or ``(..., n)`` target angles. ``shape``
+    adds the optional terms of :class:`RewardShape` (``None`` = original reward).
     """
     state = np.asarray(state, dtype=float)
     x = state[..., 0]
@@ -189,7 +235,8 @@ def base_reward(
     # (r_angle≈0) and penalized only near the goal (r_angle≈1), so the reward
     # rewards *holding* the configuration — including bringing a hanging pose to
     # rest — without fighting the energy pumping a transition needs.
-    vel_pen = np.exp(-0.1 * np.sum(thd**2, axis=-1))
+    vel_k = 0.1 if shape is None else shape.vel_k
+    vel_pen = np.exp(-vel_k * np.sum(thd**2, axis=-1))
     r_vel = 1.0 - 0.5 * r_angle * (1.0 - vel_pen)
     # Mild energy/effort term on the normalized force.
     a = np.asarray(F, dtype=float) / physics.force_max
@@ -199,7 +246,41 @@ def base_reward(
     da = np.asarray(dF_cmd, dtype=float) / physics.force_max
     r_rate = 1.0 - RATE_PENALTY * np.minimum(da * da, 1.0)
 
-    return r_angle * r_pos * r_vel * r_act * r_rate
+    reward = r_angle * r_pos * r_vel * r_act * r_rate
+    if shape is not None:
+        if shape.effort_weight > 0.0:
+            f = np.asarray(F, dtype=float)
+            quiet = np.exp(-((f / shape.effort_scale) ** 2))
+            reward = reward * (1.0 - shape.effort_weight * r_angle * (1.0 - quiet))
+        if shape.wall_weight > 0.0:
+            edge = np.clip(
+                (np.abs(x) / physics.x_lim - shape.wall_start)
+                / (1.0 - shape.wall_start),
+                0.0,
+                1.0,
+            )
+            reward = reward * (1.0 - shape.wall_weight * edge**2)
+    return reward
+
+
+def energy_potential(
+    state: np.ndarray,
+    goal: np.ndarray,
+    physics: PhysicsParams,
+    shape: RewardShape | None,
+) -> np.ndarray:
+    """Energy-gap shaping potential ``-w (1 - r_angle) min(|E - E*|/range, 1)``.
+
+    ``E*`` is the energy of the goal pose at rest. Zero when the energy shaping is
+    off. Vectorized over leading dims of ``state`` (and ``goal``).
+    """
+    state = np.asarray(state, dtype=float)
+    if shape is None or shape.energy_weight <= 0.0:
+        return np.zeros(state.shape[:-1])
+    n = (state.shape[-1] - 2) // 2
+    gap = np.abs(total_energy_batch(state, physics) - goal_energy(goal, physics))
+    fade = 1.0 - angle_potential(state[..., 2::2], goal)
+    return -shape.energy_weight * fade * np.minimum(gap / energy_range(physics, n), 1.0)
 
 
 def goal_reward(
@@ -209,6 +290,7 @@ def goal_reward(
     dF_cmd: np.ndarray | float,
     goal: np.ndarray,
     physics: PhysicsParams,
+    shape: RewardShape | None = None,
 ) -> np.ndarray:
     """Full per-step reward (base + potential shaping) for an arbitrary goal.
 
@@ -220,7 +302,15 @@ def goal_reward(
     shaping = SHAPING_GAMMA * angle_potential(
         np.asarray(state)[..., 2::2], goal
     ) - angle_potential(np.asarray(prev_state)[..., 2::2], goal)
-    return base_reward(state, F, dF_cmd, goal, physics) + SHAPING_WEIGHT * shaping
+    reward = (
+        base_reward(state, F, dF_cmd, goal, physics, shape) + SHAPING_WEIGHT * shaping
+    )
+    if shape is not None and shape.energy_weight > 0.0:
+        reward = reward + (
+            SHAPING_GAMMA * energy_potential(state, goal, physics, shape)
+            - energy_potential(prev_state, goal, physics, shape)
+        )
+    return reward
 
 
 def encode_obs(state: np.ndarray) -> np.ndarray:
@@ -327,13 +417,14 @@ class NPendulumCartpole(gym.Env):
         self.n_links = n
         self.N_LINKS = n
         hw = self.cfg.hardware
+        self._uses_sysid = hw is not None and hw.sysid_context
 
         # Observation width: kinematic dims + goal + sysID context when configured.
         self.goal_conditioned = bool(self.cfg.goal_conditioned)
         self.OBS_DIM = (
             obs_dim(n)
             + (goal_dim(n) if self.goal_conditioned else 0)
-            + (sysid_dim(n) if hw is not None else 0)
+            + (sysid_dim(n) if self._uses_sysid else 0)
         )
         self.state_dim = 2 + 2 * n
         p = self.cfg.physics
@@ -343,7 +434,7 @@ class NPendulumCartpole(gym.Env):
             highs += [1.0, 1.0, np.inf]
         if self.goal_conditioned:
             highs += [1.0] * goal_dim(n)
-        if hw is not None:
+        if self._uses_sysid:
             highs += [np.inf] * sysid_dim(n)
         obs_high = np.array(highs, dtype=np.float32)
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
@@ -358,6 +449,10 @@ class NPendulumCartpole(gym.Env):
         self._sysid_context: np.ndarray | None = None
         self._prev_cmd = 0.0  # last commanded force (for the rate penalty)
         self._prev_applied = 0.0  # last force applied to the plant (slew limit)
+        # The plant the dynamics integrate: nominal, or a per-episode draw.
+        self._plant = self.cfg.physics
+        self._force_gain = 1.0
+        self._prev_energy_potential = 0.0  # energy-shaping potential (see RewardShape)
 
         # Goal state. Non-conditioned mode keeps the all-upright target forever.
         self.goal_configs = goal_configs(n)
@@ -421,15 +516,20 @@ class NPendulumCartpole(gym.Env):
         self._step_count = 0
         self._prev_cmd = 0.0
         self._prev_applied = 0.0
-        self._prev_potential = self._angle_potential(self._state)
+        self._reset_potentials()
         self._settled = 0
 
+        if cfg.randomize is not None:
+            self._plant, self._force_gain = cfg.randomize.sample(
+                cfg.physics, n, self.np_random
+            )
         hw = self.cfg.hardware
         if hw is not None:
-            # Resample sysID context for this episode.
-            self._sysid_context = _build_sysid_context(
-                self.cfg.physics, n, hw, self.np_random
-            )
+            if self._uses_sysid:
+                # Resample sysID context for this episode.
+                self._sysid_context = _build_sysid_context(
+                    self.cfg.physics, n, hw, self.np_random
+                )
             # Reset action delay buffer.
             if hw.delay_steps > 0:
                 self._action_buf = collections.deque(
@@ -534,7 +634,7 @@ class NPendulumCartpole(gym.Env):
             if hold is not None
             else 0
         )
-        self._prev_potential = self._angle_potential(self._state)
+        self._reset_potentials()
 
     def set_goal(self, goal: int | str) -> np.ndarray:
         """Command a new target configuration now; return the updated observation.
@@ -607,7 +707,7 @@ class NPendulumCartpole(gym.Env):
             )
         self._prev_applied = applied_F
 
-        self._state = step(self._state, applied_F, p)
+        self._state = step(self._state, applied_F * self._force_gain, self._plant)
         self._step_count += 1
 
         obs = self._make_obs()
@@ -690,6 +790,21 @@ class NPendulumCartpole(gym.Env):
         """
         return float(angle_potential(np.asarray(state)[2::2], self._goal))
 
+    def _energy_potential(self, state: np.ndarray) -> float:
+        """Energy-gap shaping potential under the current goal (0 when off)."""
+        return float(
+            energy_potential(state, self._goal, self.cfg.physics, self.cfg.reward_shape)
+        )
+
+    def _reset_potentials(self) -> None:
+        """Re-anchor both shaping potentials to the current state and goal.
+
+        Called on reset and on every goal switch so the switch itself produces no
+        shaping spike.
+        """
+        self._prev_potential = self._angle_potential(self._state)
+        self._prev_energy_potential = self._energy_potential(self._state)
+
     def _compute_reward(
         self, state: np.ndarray, F: float, dF_cmd: float = 0.0
     ) -> float:
@@ -699,7 +814,8 @@ class NPendulumCartpole(gym.Env):
         or a²; goal targets are 0/π), which keeps the symmetry augmentation used
         in training valid. See ``base_reward`` for the individual factors.
         """
-        base = float(base_reward(state, F, dF_cmd, self._goal, self.cfg.physics))
+        shape = self.cfg.reward_shape
+        base = float(base_reward(state, F, dF_cmd, self._goal, self.cfg.physics, shape))
         r_angle = self._angle_potential(state)
 
         # Potential-based shaping (Ng et al. 1999): F(s,s') = g*P(s') - P(s), with
@@ -708,7 +824,12 @@ class NPendulumCartpole(gym.Env):
         shaping = self.SHAPING_GAMMA * r_angle - self._prev_potential
         self._prev_potential = r_angle
 
-        return float(base + self.SHAPING_WEIGHT * shaping)
+        reward = base + self.SHAPING_WEIGHT * shaping
+        if shape is not None and shape.energy_weight > 0.0:
+            energy = self._energy_potential(state)
+            reward += self.SHAPING_GAMMA * energy - self._prev_energy_potential
+            self._prev_energy_potential = energy
+        return float(reward)
 
     def get_state(self) -> np.ndarray:
         """Return the current raw physics state (``2 + 2n``)."""

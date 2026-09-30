@@ -56,6 +56,12 @@ class HardwareConfig:
     # model encoder / IMU noise.  Set to 0.0 if your sensors are clean.
     sensor_noise_std: float = 0.0
 
+    # Append the (noisy) sysID context vector to every observation. Turn off to
+    # keep the observation purely kinematic (+ goal) while still modelling the
+    # action delay and sensor noise — the actor then needs no parameter inputs,
+    # and robustness to model error comes from ``EnvConfig.randomize`` instead.
+    sysid_context: bool = True
+
     @classmethod
     def from_toml(cls, path: str | Path) -> HardwareConfig:
         """Load from the ``[hardware]`` section of a TOML config file.
@@ -81,4 +87,5 @@ class HardwareConfig:
             joint_friction_noise=noise_data.get("joint_friction_noise", 0.0005),
             delay_steps=pipe_data.get("delay_steps", 1),
             sensor_noise_std=pipe_data.get("sensor_noise_std", 0.0),
+            sysid_context=pipe_data.get("sysid_context", True),
         )

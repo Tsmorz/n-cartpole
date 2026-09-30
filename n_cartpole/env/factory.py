@@ -34,7 +34,7 @@ def env_spec(config: EnvConfig) -> tuple[int, np.ndarray]:
     context dimensions when ``config.hardware`` is set.
     """
     n = config.n_links
-    with_sysid = config.hardware is not None
+    with_sysid = config.hardware is not None and config.hardware.sysid_context
     # getattr: configs pickled in checkpoints before goal conditioning existed.
     with_goal = bool(getattr(config, "goal_conditioned", False))
     dim = (

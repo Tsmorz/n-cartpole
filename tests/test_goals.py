@@ -30,8 +30,12 @@ from n_cartpole.env.goals import (
     parse_goal_schedule,
 )
 from n_cartpole.env.hardware_config import HardwareConfig
+from n_cartpole.env.randomization import PlantRandomization
 from n_cartpole.policy.loader import load_policy
-from n_cartpole.training.evaluate import evaluate_transitions
+from n_cartpole.training.evaluate import (
+    evaluate_transition_metrics,
+    evaluate_transitions,
+)
 from n_cartpole.training.off_policy import TQCConfig, TQCTrainer
 
 
@@ -375,6 +379,20 @@ def test_tqc_goal_training_smoke_and_resume(tmp_path: Path) -> None:
     stats = evaluate_transitions(bundle, seconds=0.6, trials=1)
     assert stats.count[1:].sum() == 16  # every (start, goal) pair once
 
+    stats, metrics = evaluate_transition_metrics(bundle, seconds=0.6, trials=1)
+    assert stats.count[1:].sum() == 16
+    assert all(len(metrics.trials[s][g]) == 1 for s in range(4) for g in range(4))
+    # Peak force/speed are recorded for every pair and respect the actuator cap.
+    assert np.all(metrics.peak_force() <= bundle.physics.force_max + 1e-6)
+    assert np.all(metrics.peak_xdot() >= 0.0)
+    assert "median time-to-settle" in metrics.format(goal_labels(2))
+
+    # A randomized true plant is accepted and still yields metrics for every pair.
+    _, noisy = evaluate_transition_metrics(
+        bundle, seconds=0.6, trials=1, randomize=PlantRandomization()
+    )
+    assert all(len(noisy.trials[s][g]) == 1 for s in range(4) for g in range(4))
+
 
 def test_buffer_without_raw_rejects_relabel_file(tmp_path: Path) -> None:
     """Loading a buffer that lacks raw transitions into a goal run fails loudly."""
@@ -559,3 +577,28 @@ def test_hold_phase_switches_off(tmp_path: Path) -> None:
     trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path, hold_phase_steps=60))
     trainer.train()
     assert not trainer.env.hold_only
+
+
+def test_settle_metrics_for_held_equilibrium() -> None:
+    """A do-nothing policy holding DD settles immediately with ~0 N force."""
+    from n_cartpole.training.evaluate import _rollout
+
+    class Zero:
+        goal_conditioned = True
+        physics = PhysicsParams()
+
+        @staticmethod
+        def normalize(obs):
+            return obs
+
+        @staticmethod
+        def select_action(_obs):
+            return np.zeros((1, 1))
+
+    cfg = EnvConfig(goal_conditioned=True, goal_hold_steps=None, max_steps=300)
+    env = NPendulumCartpole(cfg)
+    trial, seg = _rollout(Zero(), env, start=3, goal=3, seed=0)  # DD → DD
+    assert trial.success and seg is not None and seg[2]
+    assert trial.settle_time == 0.0
+    assert trial.hold_rms_force == 0.0 and trial.peak_force == 0.0
+    assert not trial.terminated

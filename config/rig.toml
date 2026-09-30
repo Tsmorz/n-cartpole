@@ -1,0 +1,83 @@
+# Reference rig: a realistic, buildable bench double-pendulum cartpole.
+#
+# Every number below is a real part choice so you can swap in your own and
+# re-train. Load it with:   task train -- --config config/rig.toml [...]
+# The physics section is the NOMINAL model the controller is trained against;
+# [randomize] perturbs the TRUE plant each episode so the policy tolerates the
+# gap to your real hardware. Status: provisional until a feasibility run
+# confirms swing-up fits within the force / rail limits (see plan).
+#
+# Print the derived link table at training start, or:
+#   uv run python -c "from n_cartpole.config import *; \
+#     c = load_tqc_config('config/rig.toml'); print(rig_summary(c.env.physics, 2))"
+
+[physics]
+dt        = 0.01     # 100 Hz control loop (comfortable for an ESP32-S3 + encoders)
+g         = 9.81
+
+# --- Cart + drive ----------------------------------------------------------
+# Belt drive: GT2 20-tooth pulley (pitch radius 6.35 mm) on a small BLDC/servo
+# with a current-loop driver. ~0.12 N·m peak torque / 6.35 mm = ~19 N at the
+# belt; derated to 15 N for margin (belt stretch, motor heating).
+force_max = 15.0     # peak cart force (N)
+# Effective moving mass: carriage + 2 linear bearings + encoder + belt clamp
+# (~0.55 kg) plus the motor/pulley inertia reflected to the belt, J/r^2
+# (~0.3-0.5 kg for a motor this size) -> ~1.0 kg.
+M         = 1.00
+b         = 0.10     # viscous friction of bearings + belt (N·s/m)
+
+# --- Rail ------------------------------------------------------------------
+# 1.0 m rail, 0.10 m carriage, 0.05 m bumper margin at each end -> the carriage
+# centre can travel +-0.40 m. Leaving this is a hard failure (end-stop hit).
+x_lim     = 0.40
+
+# --- Links -----------------------------------------------------------------
+# Each link is a uniform 6061-T6 aluminium flat bar (25 x 3 mm, rho = 2700 kg/m^3)
+# between joint centres, plus a point-mass "tip assembly" at its distal joint
+# (bearing + clamp + magnetic encoder board on link 0's tip; an end weight on
+# link 1). Mass, centre of mass and inertia about the COM are DERIVED from these
+# (dynamics.link_from_parts) — measure your built links and compare.
+lengths        = 0.25       # joint-to-joint (m)
+joint_friction = 0.002      # 608-class bearing, viscous equivalent (N·m·s/rad)
+
+[physics.links]
+bar_width     = 0.025
+bar_thickness = 0.003
+bar_density   = 2700.0
+tip_masses    = [0.08, 0.05]   # kg
+
+[env]
+n_links     = 2
+force_slew  = 800.0     # N/s: current-loop bandwidth limit on the applied force
+
+# --- Hardware pipeline: delay + sensor noise, but NO sysID block in the obs ---
+# (the deployed actor stays a plain kinematics -> force network; robustness to
+# model error comes from [randomize]).
+[hardware.pipeline]
+delay_steps      = 1        # one 10 ms control period between command and actuation
+sensor_noise_std = 0.0
+sysid_context    = false
+
+# --- True-plant randomization (per episode) -----------------------------------
+[randomize]
+cart_mass_rel        = 0.10          # +-10 %
+cart_friction_scale  = [0.5, 2.0]    # belt/bearing friction is only known to a factor
+link_mass_rel        = 0.10
+link_length_rel      = 0.02
+link_com_rel         = 0.05
+link_inertia_rel     = 0.15
+joint_friction_scale = [0.5, 2.0]
+force_gain_rel       = 0.10          # drive gain error
+
+# --- Reward shaping for fast, steady, in-bounds transitions ---------------------
+# See cartpole.RewardShape. The energy term removes the dead zone at hanging-down
+# (goals with an upright link otherwise give ~zero reward/gradient near DD); the
+# wall term keeps transitions clear of the end-stops; the effort/velocity terms
+# make holds quiet and still once at the goal.
+[reward]
+energy_weight = 0.1     # potential-based; faded out by (1 - alignment)
+wall_weight   = 0.5     # reward factor 1 - 0.5 * edge^2 past 70 % of the rail half-length
+wall_start    = 0.7
+effort_weight = 0.5     # hold-gated force penalty
+effort_scale  = 2.0     # N
+vel_k         = 0.5     # hold-gated joint-speed penalty (original reward: 0.1)

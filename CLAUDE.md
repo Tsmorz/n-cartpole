@@ -17,7 +17,8 @@ task init                                       # uv sync
 task train                                      # TQC, default settings (--links 2)
 task train -- --links 1 --steps 300000          # single-link warm-up, custom args
 task train -- --goals --steps 2000000           # goal-conditioned: all UU/DU/UD/DD transitions, one net
-task eval-transitions -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt  # start×goal success matrix
+task eval-transitions -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt  # start×goal success matrix + settle time / hold force / peak force+speed / off-rail (--randomize: perturbed true plant)
+task train -- --config config/rig.toml --randomize            # buildable reference rig (rigid-body links, delay, randomized true plant, reward shaping)
 task play -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --start DD --goals "UU@0,DU@6,DD@12"
 task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt   # interactive HTML replay (auto link count)
 task plot -- --csv checkpoints/double/tqc/metrics.csv            # interactive training dashboard
@@ -47,7 +48,8 @@ uv run pytest tests/test_dynamics.py::test_energy_conservation -v
 ```
 n_cartpole/
   env/
-    dynamics.py         — GENERAL n-link mass_matrix(theta), rhs(), step() with friction — pure numpy + scipy; PhysicsParams (per-link masses/lengths/joint_friction as scalar-or-sequence LinkSpec)
+    dynamics.py         — GENERAL n-link mass_matrix(theta), rhs(), step() with friction — pure numpy + scipy; PhysicsParams (per-link masses/lengths/com/inertia/joint_friction as scalar-or-sequence LinkSpec); link_from_parts(); batched total_energy_batch()
+    randomization.py    — PlantRandomization: per-episode perturbation of the TRUE plant (masses, lengths, com, inertia, friction, force gain)
     cartpole.py         — NPendulumCartpole gymnasium.Env + EnvConfig + obs_dim()/obs_mirror_sign()/encode_obs(); one env parameterized by n_links
     double_cartpole.py  — thin back-compat shim: DoublePendulumCartpole(NPendulumCartpole), OBS_MIRROR_SIGN, re-exports EnvConfig
     single_cartpole.py  — thin back-compat shim: SinglePendulumCartpole(NPendulumCartpole), OBS_MIRROR_SIGN
@@ -73,7 +75,10 @@ scripts/
   play.py               — load checkpoint → interactive HTML replay
   plot_returns.py       — metrics.csv/returns.csv → interactive training dashboard (task plot)
   policy_map.py         — checkpoint → input→output control-surface map (task policy-map)
-  eval_transitions.py   — goal-conditioned checkpoint → start×goal success matrix (task eval-transitions)
+  eval_transitions.py   — goal-conditioned checkpoint → start×goal success matrix + speed/steadiness/effort matrices (task eval-transitions)
+config/
+  default.toml          — point-mass defaults
+  rig.toml              — reference buildable rig: Al-bar links + tip assemblies (com/inertia derived via link_from_parts), 1 m rail (x_lim 0.40), 15 N belt drive, 1-step delay, [randomize], [reward]; loaded by `train.py --config`
   export_web.py         — swing-up checkpoint → float16 weights + physics JSON + parity fixture for the website (task export-web)
 tests/
   test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD (2-link)
@@ -81,10 +86,19 @@ tests/
   test_single.py        — single-link env/dynamics/factory
   test_n_links.py       — n = 3, 4: energy conservation, PD mass matrix, gym contract, reward bounds; PhysicsParams broadcasting + legacy-checkpoint upgrade
   test_tqc.py           — actor/critic shapes, quantile loss, TQC update + save/resume
-  test_goals.py         — goal conditioning: obs layout, reward/relabel parity, segments, curriculum, trainers, play
+  test_goals.py         — goal conditioning: obs layout, reward/relabel parity, segments, curriculum, trainers, play, transition metrics
+  test_rigid_links.py   — com/inertia links: exact parity with the point-mass model, finite-difference Euler–Lagrange check, energy conservation, fast-path (_ode) == rhs/mass_matrix
+  test_rig.py           — rig.toml plausibility, link_from_parts, plant randomization (ranges, mirror symmetry), no-sysID obs layout
+  test_reward_shape.py  — RewardShape: zero weights == original reward, energy potential (no DD dead zone), wall/effort terms, env↔goal_reward parity, relabel
 ```
 
 **n links**: The env, dynamics, obs encoding, mirror-symmetry, and reward are all generalized to an arbitrary number of pendulum links, selected by `EnvConfig.n_links` (`--links 1|2|3|4|…`; anything ≥1 works). `dynamics.py` builds the `(n+1)×(n+1)` mass matrix and `rhs` from closed forms (absolute angles, so the velocity coupling is purely centrifugal), verified term-by-term against the old hand-derived single/double models and symbolically for n up to 4. Checkpoints go under `checkpoints/<single|double|triple|quadruple|Nlink>/<tqc|tqc-goal>/` via `factory.links_name()`. Per-link physics (`PhysicsParams.masses/lengths/joint_friction`) accept a scalar (shared across links) or a per-link sequence; a shorter sequence is extended by repeating its last value, so `--links 3` just works with the 2-link defaults.
+
+**Rigid-body links and the reference rig**: `PhysicsParams.com` (joint→centre-of-mass, default = `lengths`) and `.inertia` (about the COM, default 0) make each link a rigid body; the defaults are the original point-mass bob. `dynamics.py` generalizes the closed forms with `a_k = m_k c_k + l_k Σ_{i>k} m_i` and `d_k = I_k + m_k c_k² + l_k² Σ_{i>k} m_i` (see its module docstring). **`_ode` (the integrator's hot path, coefficients precomputed once per `step()`) duplicates the equations in `rhs`/`mass_matrix`** — change all three together; `tests/test_rigid_links.py` pins them to each other, to the old point-mass formulas, and to a finite-difference Euler–Lagrange residual. `config/rig.toml` is the buildable reference rig (every number has a part-level comment; link mass/com/inertia are derived from bar dimensions + tip masses). `train.py --config` takes the *env* (physics, hardware pipeline, `[randomize]`, `[reward]`) from the TOML; training hyperparameters stay CLI flags, and checkpoints go to a `-<config name>` folder (e.g. `checkpoints/double/tqc-goal-rig/`) so they never overwrite the point-mass ones (web export + `package-models` only use `tqc`/`tqc-goal`).
+
+**True plant vs nominal model**: `EnvConfig.randomize` perturbs the plant the dynamics integrate each episode (`env._plant`, `env._force_gain`), but rewards, energy shaping, `goal_reward`/replay relabeling, and the sysID context all use the *nominal* `cfg.physics` — so relabeled rewards stay consistent with the buffer. `HardwareConfig.sysid_context=False` keeps the action delay/sensor noise but leaves the observation purely kinematic (+ goal), which is what the rig config uses (the deployed actor needs no parameter inputs).
+
+**Reward shaping** (`EnvConfig.reward_shape`, `RewardShape`; `None` = the original reward exactly): (1) an energy-gap potential, faded by `1 − r_angle`, fixes the zero-value/zero-slope dead zone of the angle-product potential at hanging-down for any goal with an upright link (the cause of the ~10 s idle on DD→UD/UU); (2) a rail-margin factor keeps transitions off the end-stops; (3) a hold-gated force penalty and a sharper velocity gate make holds quiet. All are mirror-even. `goal_reward()`/`_relabel` take the shape; the env keeps a second potential (`_prev_energy_potential`, re-anchored by `_reset_potentials()` on reset and every goal switch). Scripts that set `env._prev_potential` by hand (`eval_swingup.py`, `export_web.py`) are for the unshaped swing-up only.
 
 **State vs. observation**: The internal physics state is `[x, ẋ, θ₁, θ̇₁, …, θₙ, θ̇ₙ]` (`2 + 2n`-D, angles in radians, 0 = upright). The observation fed to the net is `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, …]` (`2 + 3n`-D) to remove the angle discontinuity at ±π. So the double link is 6D state / 8D obs, single is 4D/5D, triple is 8D/11D.
 

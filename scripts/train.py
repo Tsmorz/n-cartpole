@@ -9,9 +9,10 @@ from pathlib import Path
 import torch
 from loguru import logger
 
-from n_cartpole.env.cartpole import EnvConfig
-from n_cartpole.env.dynamics import PhysicsParams
+from n_cartpole.config import load_tqc_config, rig_summary
+from n_cartpole.env.cartpole import EnvConfig, RewardShape
 from n_cartpole.env.factory import checkpoint_subdir, links_name
+from n_cartpole.env.randomization import PlantRandomization
 from n_cartpole.training.off_policy import TQCConfig, TQCTrainer
 
 
@@ -104,6 +105,42 @@ def parse_args() -> argparse.Namespace:
         "(stabilize every configuration before learning transitions)",
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="TOML file supplying the environment: physics (incl. rigid-body links), "
+        "hardware pipeline, plant randomization, actuator slew (e.g. "
+        "config/rig.toml). Training hyperparameters stay CLI flags. Checkpoints "
+        "default to a '-<config name>' folder so they never overwrite the "
+        "point-mass ones.",
+    )
+    parser.add_argument(
+        "--randomize",
+        action="store_true",
+        help="Randomize the TRUE plant each episode (masses, lengths, friction, "
+        "actuator gain) so the policy tolerates model error. Uses the config's "
+        "[randomize] ranges, or the defaults without a config.",
+    )
+    parser.add_argument(
+        "--energy-shaping",
+        type=float,
+        default=None,
+        help="Weight of the energy-gap shaping potential (removes the reward dead "
+        "zone at hanging-down; overrides the config's [reward] value; 0 = off)",
+    )
+    parser.add_argument(
+        "--wall-weight",
+        type=float,
+        default=None,
+        help="Weight of the rail-margin reward factor (overrides [reward]; 0 = off)",
+    )
+    parser.add_argument(
+        "--hold-effort",
+        type=float,
+        default=None,
+        help="Weight of the hold-gated force penalty (overrides [reward]; 0 = off)",
+    )
+    parser.add_argument(
         "--resume",
         type=Path,
         default=None,
@@ -124,13 +161,29 @@ def main() -> None:
             "--init-from needs --goals and cannot be combined with --resume"
         )
 
-    checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name(
-        args.links
-    ) / checkpoint_subdir("tqc", args.goals)
+    subdir = checkpoint_subdir("tqc", args.goals)
+    base_env = EnvConfig()
+    if args.config is not None:
+        base_env = load_tqc_config(args.config).env
+        subdir += f"-{args.config.stem}"
+    overrides = {
+        "energy_weight": args.energy_shaping,
+        "wall_weight": args.wall_weight,
+        "effort_weight": args.hold_effort,
+    }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    if overrides:
+        shape = dataclasses.replace(base_env.reward_shape or RewardShape(), **overrides)
+        base_env = dataclasses.replace(base_env, reward_shape=shape)
+    if args.randomize and base_env.randomize is None:
+        base_env = dataclasses.replace(base_env, randomize=PlantRandomization())
+    checkpoint_dir = (
+        args.checkpoint_dir or Path("checkpoints") / links_name(args.links) / subdir
+    )
 
     cfg = TQCConfig(
-        env=EnvConfig(
-            physics=PhysicsParams(),
+        env=dataclasses.replace(
+            base_env,
             n_links=args.links,
             goal_conditioned=args.goals,
             max_steps=args.max_steps or (3000 if args.goals else 1000),
@@ -149,6 +202,14 @@ def main() -> None:
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )
+    if args.config is not None:
+        logger.info(
+            f"Rig from {args.config}:\n{rig_summary(cfg.env.physics, args.links)}"
+        )
+    if cfg.env.randomize is not None:
+        logger.info(f"Plant randomization: {cfg.env.randomize}")
+    if cfg.env.reward_shape is not None:
+        logger.info(f"Reward shaping: {cfg.env.reward_shape}")
     if args.init_from is not None:
         # The warm-started network must have the source's shape and physics.
         src = torch.load(args.init_from, map_location="cpu", weights_only=False)["cfg"]

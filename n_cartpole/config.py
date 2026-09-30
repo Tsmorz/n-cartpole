@@ -16,17 +16,50 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from n_cartpole.training.off_policy import TQCConfig
 
-from n_cartpole.env.cartpole import EnvConfig
-from n_cartpole.env.dynamics import PhysicsParams
+from n_cartpole.env.cartpole import EnvConfig, RewardShape
+from n_cartpole.env.dynamics import PhysicsParams, link_from_parts
 from n_cartpole.env.hardware_config import HardwareConfig
+from n_cartpole.env.randomization import PlantRandomization
+
+
+def _link_specs_from_bars(d: dict) -> dict:
+    """Derive per-link ``masses/com/inertia`` from real bar dimensions + tip masses.
+
+    ``d`` is the ``[physics.links]`` table: a rectangular bar
+    (``bar_width * bar_thickness``, ``bar_density``) spans each link's ``lengths``
+    joint to joint, and ``tip_masses`` are point masses at each distal joint.
+    """
+    tips = [float(t) for t in d["links"]["tip_masses"]]
+    n = len(tips)
+    lengths = PhysicsParams(lengths=d.get("lengths", 0.25)).link_lengths(n)
+    links = d["links"]
+    area = links["bar_width"] * links["bar_thickness"]
+    rod = area * links["bar_density"] * lengths
+    parts = [link_from_parts(lengths[i], rod[i], tips[i]) for i in range(n)]
+    return {
+        "masses": tuple(p[0] for p in parts),
+        "com": tuple(p[1] for p in parts),
+        "inertia": tuple(p[2] for p in parts),
+        "lengths": tuple(float(x) for x in lengths),
+    }
 
 
 def _physics_from(d: dict) -> PhysicsParams:
+    specs = (
+        _link_specs_from_bars(d)
+        if "links" in d
+        else {
+            "masses": d.get("masses", (0.20, 0.15)),
+            "lengths": d.get("lengths", 0.25),
+            "com": d.get("com"),
+            "inertia": d.get("inertia", 0.0),
+        }
+    )
     return PhysicsParams(
         M=d.get("M", 1.0),
         g=d.get("g", 9.81),
@@ -34,10 +67,37 @@ def _physics_from(d: dict) -> PhysicsParams:
         force_max=d.get("force_max", 20.0),
         x_lim=d.get("x_lim", 0.5),
         b=d.get("b", 0.10),
-        masses=d.get("masses", (0.20, 0.15)),
-        lengths=d.get("lengths", 0.25),
         joint_friction=d.get("joint_friction", 0.002),
+        **specs,
     )
+
+
+def _randomization_from(d: dict) -> PlantRandomization:
+    """Build ``PlantRandomization`` from the ``[randomize]`` table (lists → tuples)."""
+    kwargs: dict[str, Any] = {
+        k: (tuple(v) if isinstance(v, list) else v) for k, v in d.items()
+    }
+    return PlantRandomization(**kwargs)
+
+
+def rig_summary(physics: PhysicsParams, n_links: int) -> str:
+    """Human-readable table of the rig parameters a build must match."""
+    m = physics.link_masses(n_links)
+    ln = physics.link_lengths(n_links)
+    c = physics.link_coms(n_links)
+    inertia = physics.link_inertias(n_links)
+    lines = [
+        f"cart: M={physics.M:.3f} kg, b={physics.b:.3f} N·s/m, rail ±{physics.x_lim:.2f} m, "
+        f"force ±{physics.force_max:.1f} N ({physics.force_max / physics.M:.1f} m/s² on the cart), "
+        f"dt={physics.dt * 1000:.0f} ms",
+    ]
+    for i in range(n_links):
+        lines.append(
+            f"link {i}: m={m[i]:.4f} kg, length={ln[i]:.3f} m, com={c[i]:.3f} m, "
+            f"I_com={inertia[i]:.3e} kg·m², joint friction="
+            f"{physics.joint_frictions(n_links)[i]:.4f} N·m·s/rad"
+        )
+    return "\n".join(lines)
 
 
 def _env_from(data: dict) -> EnvConfig:
@@ -59,6 +119,7 @@ def _env_from(data: dict) -> EnvConfig:
             joint_friction_noise=noise.get("joint_friction_noise", 0.0005),
             delay_steps=pipe.get("delay_steps", 1),
             sensor_noise_std=pipe.get("sensor_noise_std", 0.0),
+            sysid_context=pipe.get("sysid_context", True),
         )
 
     hold = env_d.get("goal_hold_steps", [400, 800])
@@ -70,6 +131,11 @@ def _env_from(data: dict) -> EnvConfig:
         init_random_prob=env_d.get("init_random_prob", 0.3),
         init_vel_noise=env_d.get("init_vel_noise", 2.0),
         hardware=hw,
+        randomize=_randomization_from(data["randomize"])
+        if "randomize" in data
+        else None,
+        reward_shape=RewardShape(**data["reward"]) if "reward" in data else None,
+        force_slew=env_d.get("force_slew", 800.0),
         goal_conditioned=env_d.get("goal_conditioned", False),
         goal_hold_steps=tuple(hold) if hold else None,
         goal_curriculum=env_d.get("goal_curriculum", True),

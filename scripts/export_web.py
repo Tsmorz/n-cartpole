@@ -1,4 +1,8 @@
-"""CLI: export a swing-up TQC actor for in-browser inference (the personal site).
+"""CLI: export a TQC actor for in-browser inference (the personal site).
+
+Takes a goal-conditioned checkpoint (``--goals``; the default) or a plain swing-up
+one. For a goal net the JSON also lists every target configuration, and the net's
+extra inputs (``cos`` of each link's target angle) follow the kinematic ones.
 
 Writes three files to ``--out-dir``:
 
@@ -10,7 +14,8 @@ Writes three files to ``--out-dir``:
   the mean row of the output head is kept (deterministic action = tanh(mean) *
   force_max), so the browser needs no normalizer and no log-std.
 - ``<name>-fixture.json``: parity data for the site's Node test: observation →
-  torch action pairs, near-hanging starts with their Python swing-up times, and
+  torch action pairs, closed-loop starts with their Python times (near-hanging
+  swing-ups, or for a goal net one transition per ``(start, goal)`` pair), and
   one open-loop trajectory from :func:`n_cartpole.env.dynamics.step`.
 """
 
@@ -28,21 +33,23 @@ from loguru import logger
 from n_cartpole.env.cartpole import encode_obs
 from n_cartpole.env.dynamics import step
 from n_cartpole.env.factory import make_env
+from n_cartpole.env.goals import goal_configs, goal_labels
 from n_cartpole.policy.loader import load_policy
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2  # 2: optional "goals" block + goal inputs
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Export a swing-up TQC actor + physics for the browser."
+        description="Export a TQC actor (goal-conditioned or swing-up) + physics "
+        "for the browser."
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("checkpoints/double/tqc/tqc_latest.pt"),
-        help="Plain (non-goal) swing-up checkpoint without sysID inputs",
+        default=Path("checkpoints/double/tqc-goal/tqc_latest.pt"),
+        help="Goal-conditioned or plain swing-up checkpoint without sysID inputs",
     )
     parser.add_argument(
         "--out-dir",
@@ -94,14 +101,17 @@ def main() -> None:
     args = parse_args()
     bundle = load_policy(args.checkpoint)
     cfg = bundle.env_config
-    if bundle.goal_conditioned or cfg.hardware is not None:
+    if cfg.hardware is not None or cfg.randomize is not None:
         raise ValueError(
-            "export_web supports plain swing-up checkpoints only "
-            "(no goal conditioning, no sysID/hardware inputs)"
+            "export_web supports simulation checkpoints only "
+            "(no sysID/hardware inputs, no plant randomization)"
         )
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     p = bundle.physics
     n = bundle.n_links
+    goals = bundle.goal_conditioned
+    if p.com is not None or np.any(p.link_inertias(n) != 0.0):
+        raise ValueError("the browser port models point-mass links only")
 
     tensors = _actor_tensors(ckpt)
     table, blobs, offset = [], [], 0
@@ -134,7 +144,8 @@ def main() -> None:
             "settle_steps": cfg.goal_settle_steps,
         },
         "network": {
-            "obs": "x, xd, then cos(th), sin(th), thd per link (th = 0 upright)",
+            "obs": "x, xd, then cos(th), sin(th), thd per link (th = 0 upright)"
+            + (", then cos(target th) per link" if goals else ""),
             "obs_dim": bundle.obs_dim,
             "hidden": bundle.hidden,
             "expand": 4,
@@ -145,6 +156,13 @@ def main() -> None:
         },
     }
 
+    if goals:
+        # Labels are one U/D per link, base link first; targets are 0 (up) / pi (down).
+        meta["goals"] = {
+            "labels": goal_labels(n),
+            "targets": goal_configs(n).tolist(),
+        }
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     bin_path = args.out_dir / f"{args.name}.bin"
     bin_path.write_bytes(b"".join(blobs))
@@ -154,20 +172,28 @@ def main() -> None:
     # --- Parity fixtures -----------------------------------------------------
     rng = np.random.default_rng(args.seed)
 
-    def act(raw: np.ndarray) -> np.ndarray:
-        obs = bundle.encode(np.atleast_2d(raw))
-        return bundle.select_action(bundle.normalize(obs))[:, 0]
+    n_goals = len(goal_configs(n))
 
-    # 1) Network parity over states spread across the whole operating range.
+    def obs_of(raw: np.ndarray, goal: int | None) -> np.ndarray:
+        return bundle.encode(np.atleast_2d(raw), goal=goal)[0]
+
+    # 1) Network parity over states spread across the whole operating range
+    #    (and, for a goal net, every goal).
     states = np.empty((64, 2 + 2 * n))
     states[:, 0] = rng.uniform(-p.x_lim, p.x_lim, 64)
     states[:, 1] = rng.uniform(-2, 2, 64)
     states[:, 2::2] = rng.uniform(-np.pi, np.pi, (64, n))
     states[:, 3::2] = rng.uniform(-8, 8, (64, n))
+    net_goals = [i % n_goals if goals else None for i in range(64)]
+    obs_batch = np.stack([obs_of(s, g) for s, g in zip(states, net_goals, strict=True)])
+    actions = bundle.select_action(bundle.normalize(obs_batch))[:, 0]
     net_cases = [
-        {"obs": encode_obs(s).tolist(), "action": float(a)}
-        for s, a in zip(states, act(states), strict=True)
+        {"obs": o.tolist(), "action": float(a)}
+        for o, a in zip(obs_batch, actions, strict=True)
     ]
+    assert np.allclose(
+        obs_batch[:, : 2 + 3 * n], np.stack([encode_obs(s) for s in states])
+    )
 
     # 2) Physics parity: open-loop RK45 trajectory under a known force sequence.
     s = np.zeros(2 + 2 * n)
@@ -179,19 +205,39 @@ def main() -> None:
         s = step(s, f, p)
         traj.append(s.tolist())
 
-    # 3) Closed-loop swing-ups, sampled like scripts/eval_swingup.py.
-    seconds = 20.0
-    env = make_env(dataclasses.replace(cfg, max_steps=int(round(seconds / p.dt))))
+    # 3) Closed loop. A plain net: near-hanging swing-ups, sampled like
+    #    scripts/eval_swingup.py. A goal net: one episode per (start, goal) pair
+    #    with start != goal, from a perturbed equilibrium like evaluate.py.
+    seconds = 20.0 if not goals else 10.0
+    env = make_env(
+        dataclasses.replace(
+            cfg,
+            max_steps=int(round(seconds / p.dt)),
+            goal_hold_steps=None if goals else cfg.goal_hold_steps,
+        )
+    )
+    pairs: list[tuple[int, int] | None]
+    if goals:
+        pairs = [(a, b) for a in range(n_goals) for b in range(n_goals) if a != b]
+    else:
+        pairs = [None] * args.trials
+    labels = goal_labels(n)
     starts = []
-    for _ in range(args.trials):
-        env.reset(seed=int(rng.integers(2**31)))
-        st = env.get_state()
-        st[0] = 0.0
-        st[1] = rng.uniform(-0.2, 0.2)
-        st[2::2] = np.pi + rng.uniform(-0.2, 0.2, n)
-        st[3::2] = rng.uniform(-0.2, 0.2, n)
-        env._state = st.copy()
-        env._prev_potential = env._angle_potential(st)
+    for pair in pairs:
+        seed = int(rng.integers(2**31))
+        if pair is not None:
+            frm, to = pair
+            env.reset(seed=seed, options={"start": frm, "goal": to})
+            st = env.get_state()
+        else:
+            env.reset(seed=seed)
+            st = env.get_state()
+            st[0] = 0.0
+            st[1] = rng.uniform(-0.2, 0.2)
+            st[2::2] = np.pi + rng.uniform(-0.2, 0.2, n)
+            st[3::2] = rng.uniform(-0.2, 0.2, n)
+            env._state = st.copy()
+            env._prev_potential = env._angle_potential(st)
         obs = env._make_obs()
         up_time, settled, k = None, 0, 0
         terminated = truncated = False
@@ -203,8 +249,12 @@ def main() -> None:
                 settled = settled + 1 if env._at_goal(env._state) else 0
                 if settled >= cfg.goal_settle_steps:
                     up_time = (k - cfg.goal_settle_steps + 1) * p.dt
-        starts.append({"state": st.tolist(), "python_swingup_s": up_time})
-        logger.info(f"fixture start: python swing-up {up_time}")
+        entry: dict = {"state": st.tolist(), "python_swingup_s": up_time}
+        if pair is not None:
+            entry["from"], entry["goal"] = labels[pair[0]], labels[pair[1]]
+        starts.append(entry)
+        tag = f"{entry['from']} -> {entry['goal']}" if pair else "swing-up"
+        logger.info(f"fixture start ({tag}): python {up_time}")
 
     fixture = {
         "net": net_cases,

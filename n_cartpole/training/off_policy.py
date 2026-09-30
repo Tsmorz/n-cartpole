@@ -315,6 +315,7 @@ class TQCTrainer:
             b.dforce[j],
             goals,
             self.cfg.env.physics,
+            self.cfg.env.reward_shape,
         )
 
     def _sample_batch(self) -> tuple[torch.Tensor, ...]:

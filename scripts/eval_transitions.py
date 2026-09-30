@@ -8,8 +8,9 @@ from pathlib import Path
 from loguru import logger
 
 from n_cartpole.env.goals import goal_labels
+from n_cartpole.env.randomization import PlantRandomization
 from n_cartpole.policy.loader import load_policy
-from n_cartpole.training.evaluate import evaluate_transitions
+from n_cartpole.training.evaluate import evaluate_transition_metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--trials", type=int, default=5, help="Episodes per pair")
     parser.add_argument("--seed", type=int, default=0, help="Base random seed")
+    parser.add_argument(
+        "--randomize",
+        action="store_true",
+        help="Evaluate on a randomly perturbed TRUE plant each episode (masses, "
+        "lengths, friction, actuator gain) to check robustness to model error",
+    )
     return parser.parse_args()
 
 
@@ -36,11 +43,20 @@ def main() -> None:
     """Load the checkpoint, evaluate all transitions, print the matrix."""
     args = parse_args()
     bundle = load_policy(args.checkpoint)
-    stats = evaluate_transitions(bundle, args.seconds, args.trials, args.seed)
+    stats, metrics = evaluate_transition_metrics(
+        bundle,
+        args.seconds,
+        args.trials,
+        args.seed,
+        randomize=PlantRandomization() if args.randomize else None,
+    )
+    labels = goal_labels(bundle.n_links)
     logger.info(
         f"{bundle.algo.upper()} {args.checkpoint}: "
         f"{stats.success_rate():.0%} of transitions reached within {args.seconds}s\n"
-        + stats.format_matrix(goal_labels(bundle.n_links))
+        + stats.format_matrix(labels)
+        + "\n\n"
+        + metrics.format(labels)
     )
 
 
