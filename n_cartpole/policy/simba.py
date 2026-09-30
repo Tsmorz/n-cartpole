@@ -44,15 +44,14 @@ class SimbaNet(nn.Module):
     ) -> None:
         super().__init__()
         self.in_proj = nn.Linear(in_dim, hidden)
-        self.blocks = nn.ModuleList(
-            [_ResidualBlock(hidden) for _ in range(n_blocks)]
-        )
+        self.blocks = nn.ModuleList([_ResidualBlock(hidden) for _ in range(n_blocks)])
         self.final_norm = nn.LayerNorm(hidden)
         self.out_proj = nn.Linear(hidden, out_dim)
         nn.init.orthogonal_(self.out_proj.weight, gain=0.01)
         nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute the network output for input `x`."""
         h = self.in_proj(x)
         for block in self.blocks:
             h = block(h)

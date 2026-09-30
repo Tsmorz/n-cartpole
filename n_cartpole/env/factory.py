@@ -7,7 +7,6 @@ from ``EnvConfig.n_links``.
 
 from __future__ import annotations
 
-import gymnasium as gym
 import numpy as np
 
 from n_cartpole.env.double_cartpole import OBS_MIRROR_SIGN as DOUBLE_MIRROR
