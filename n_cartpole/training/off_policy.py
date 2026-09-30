@@ -7,16 +7,18 @@ hardware; it is this project's only learner.
 from __future__ import annotations
 
 import copy
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 from loguru import logger
 from tqdm import tqdm
 
-from n_cartpole.env.cartpole import goal_reward
+from n_cartpole.env.cartpole import NPendulumCartpole, goal_dim, goal_reward
 from n_cartpole.env.cartpole import obs_dim as kin_obs_dim
 from n_cartpole.env.double_cartpole import EnvConfig
 from n_cartpole.env.factory import env_spec, make_env
@@ -84,6 +86,16 @@ class TQCConfig:
     # depend on the goal, so every transition is valid training data for every
     # goal — this multiplies the data per goal by the number of goals.
     relabel_frac: float = 0.5
+    # Entropy target (nats) of the *force* distribution for the auto-tuned
+    # temperature. None = SAC's ``-action_dim`` measured on the action scaled to
+    # [-1, 1], i.e. ``action_dim * (log(force_max) - 1)`` in force units (~2.0
+    # for 20 N, exploration std ~1.8 N). The previous behavior, ``-1`` in force
+    # units, allowed only ~0.09 N of exploration noise.
+    target_entropy: float | None = None
+    # Goal-conditioned only: for the first this many env steps every episode is
+    # one hold segment (start near an equilibrium, stabilize it; see
+    # ``EnvConfig.hold_noise``) before regular transitions take over.
+    hold_phase_steps: int = 0
 
     total_steps: int = 200_000
     checkpoint_dir: Path = Path("checkpoints")
@@ -195,6 +207,22 @@ class ReplayBuffer:
         )
 
 
+def _insert_input_dims(
+    state: dict[str, torch.Tensor], at: int, k: int
+) -> dict[str, torch.Tensor]:
+    """Widen every SimBa input projection by ``k`` zero-weight columns at ``at``.
+
+    A network loaded from the result computes exactly what the original did,
+    whatever values the new inputs take.
+    """
+    out = dict(state)
+    for name, w in state.items():
+        if name.endswith("in_proj.weight"):
+            zeros = w.new_zeros(w.shape[0], k)
+            out[name] = torch.cat([w[:, :at], zeros, w[:, at:]], dim=1)
+    return out
+
+
 class TQCTrainer:
     """Trains a TQC policy for the double cartpole (single-env, replay-based)."""
 
@@ -222,8 +250,13 @@ class TQCTrainer:
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=self.cfg.lr)
 
-        # Auto-tuned entropy temperature (SAC): target entropy = -action_dim.
-        self.target_entropy = -float(ACT_DIM)
+        # Auto-tuned entropy temperature (SAC). ``logp`` is a density over force
+        # in newtons, so the default target converts SAC's -action_dim (on the
+        # [-1, 1] action) to force units.
+        te = self.cfg.target_entropy
+        self.target_entropy = (
+            ACT_DIM * (math.log(fmax) - 1.0) if te is None else float(te)
+        )
         self.log_alpha = torch.zeros(1, device=self.device, requires_grad=True)
         self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr)
 
@@ -438,9 +471,122 @@ class TQCTrainer:
         self.resumed = True
         logger.info(f"Loaded checkpoint ← {path} (step {self.step})")
 
+    def warm_start(self, path: Path) -> None:
+        """Initialize this goal-conditioned run from a plain (non-goal) checkpoint.
+
+        Actor, critics, observation normalizer, and entropy temperature are
+        copied. The goal inputs are inserted with zero weights (and identity
+        normalization), so the network starts out as the source policy — which
+        ignores the goal — and learns to use it from there. Optimizers, step,
+        and replay buffer start fresh; see :meth:`seed_buffer`.
+        """
+        if not self.goal_conditioned:
+            raise ValueError("warm_start initializes a goal-conditioned run")
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        if ckpt.get("algo") != "tqc":
+            raise ValueError(f"{path} is not a TQC checkpoint")
+        src = ckpt["cfg"]
+        if src.env.goal_conditioned:
+            raise ValueError(f"{path} is already goal-conditioned; use --resume")
+        cfg = self.cfg
+        mismatch = [
+            name
+            for name, a, b in [
+                ("n_links", src.env.n_links, cfg.env.n_links),
+                ("hardware", src.env.hardware is None, cfg.env.hardware is None),
+                ("hidden", src.hidden, cfg.hidden),
+                ("n_critics", src.n_critics, cfg.n_critics),
+                ("n_quantiles", src.n_quantiles, cfg.n_quantiles),
+            ]
+            if a != b
+        ]
+        if mismatch:
+            raise ValueError(f"{path} does not match this run's {', '.join(mismatch)}")
+
+        n = cfg.env.n_links
+        at, k = kin_obs_dim(n), goal_dim(n)
+        self.actor.load_state_dict(_insert_input_dims(ckpt["actor"], at, k))
+        self.critic.load_state_dict(_insert_input_dims(ckpt["critic"], at, k))
+        self.critic_target.load_state_dict(
+            _insert_input_dims(ckpt.get("critic_target", ckpt["critic"]), at, k)
+        )
+
+        def insert(t: torch.Tensor, value: float) -> torch.Tensor:
+            return torch.cat([t[:at], t.new_full((k,), value), t[at:]])
+
+        norm = ckpt["norm"]
+        self.norm.load_state_dict(
+            {
+                "mean": insert(norm["mean"], 0.0),
+                "var": insert(norm["var"], 1.0),
+                "count": norm["count"],
+            }
+        )
+        if "log_alpha" in ckpt:
+            with torch.no_grad():
+                self.log_alpha.copy_(ckpt["log_alpha"].to(self.device))
+        self.resumed = True  # the actor is trained: skip random-action warm-up
+        logger.info(f"Warm-started goal-conditioned run ← {path}")
+
+    def seed_buffer(self, n_steps: int) -> None:
+        """Fill the replay buffer with ``n_steps`` of the current actor's rollouts.
+
+        Meant for right after :meth:`warm_start`: the source policy's swing-ups
+        are stored with their raw states, so goal relabeling turns them into
+        data for every goal and the run starts with transitions that actually
+        reach and hold upright. Uses a separate env so the curriculum statistics
+        of the training env aren't skewed; the normalizer updates as in training.
+        """
+        env = make_env(self.cfg.env)
+        obs, _ = env.reset()
+        for _ in tqdm(range(n_steps), desc="seed buffer", unit="step"):
+            self.norm.update(torch.as_tensor(obs, device=self.device).unsqueeze(0))
+            next_obs, _, terminated, truncated, _ = self._store_step(
+                env, obs, self._policy_action(obs)
+            )
+            obs = env.reset()[0] if terminated or truncated else next_obs
+        logger.info(f"Seeded replay buffer with {n_steps} policy steps")
+
+    def _policy_action(self, obs: np.ndarray) -> np.ndarray:
+        """Sample an exploration action from the actor for one observation."""
+        with torch.no_grad():
+            return (
+                self.actor.act(self._normalize(obs).unsqueeze(0))
+                .squeeze(0)
+                .cpu()
+                .numpy()
+            )
+
+    def _store_step(
+        self, env: NPendulumCartpole, obs: np.ndarray, action: np.ndarray
+    ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        """Step ``env`` and add the transition to the buffer; return the step."""
+        state = env.get_state()
+        next_obs, reward, terminated, truncated, info = env.step(action)
+        raw = None
+        stored_next = next_obs
+        if self.goal_conditioned:
+            raw = (state, env.get_state(), info["applied_force"], info["dF_cmd"])
+            # On a goal switch ``next_obs`` already shows the new goal, but the
+            # reward was for the old one: bootstrap under the old goal (like a
+            # time-limit truncation), matching relabeled rows' fixed goal.
+            stored_next = next_obs.copy()
+            stored_next[self._goal_slice] = obs[self._goal_slice]
+        # Only a genuine terminal (out of bounds) bootstraps as done; a
+        # time-limit truncation does not.
+        self.buffer.add(obs, action, reward, stored_next, terminated, raw)
+        return next_obs, reward, terminated, truncated, info
+
     def train(self) -> None:
         """Run the off-policy training loop."""
         cfg = self.cfg
+
+        def in_hold_phase(step: int) -> bool:
+            return self.goal_conditioned and step < cfg.hold_phase_steps
+
+        self.env.hold_only = in_hold_phase(self.step)
+        if self.env.hold_only:
+            logger.info(f"Hold-only episodes until step {cfg.hold_phase_steps}")
         obs, _ = self.env.reset()
         ep_return = 0.0
         ep_len = 0
@@ -461,29 +607,13 @@ class TQCTrainer:
                 if not self.resumed and step < cfg.start_steps:
                     action = self.env.action_space.sample()
                 else:
-                    with torch.no_grad():
-                        action = (
-                            self.actor.act(self._normalize(obs).unsqueeze(0))
-                            .squeeze(0)
-                            .cpu()
-                            .numpy()
-                        )
+                    action = self._policy_action(obs)
 
-                state = self.env.get_state()
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
-                raw = None
-                if self.goal_conditioned:
-                    raw = (
-                        state,
-                        self.env.get_state(),
-                        info["applied_force"],
-                        info["dF_cmd"],
-                    )
-                    if "segment" in info:
-                        self.transition_stats.record(*info["segment"])
-                # Only a genuine terminal (out of bounds) bootstraps as done; a
-                # time-limit truncation does not.
-                self.buffer.add(obs, action, reward, next_obs, terminated, raw)
+                next_obs, reward, terminated, truncated, info = self._store_step(
+                    self.env, obs, action
+                )
+                if "segment" in info:
+                    self.transition_stats.record(*info["segment"])
                 obs = next_obs
                 ep_return += reward
                 ep_len += 1
@@ -491,6 +621,9 @@ class TQCTrainer:
                 if terminated or truncated:
                     recent_returns.append(ep_return)
                     recent_returns = recent_returns[-20:]
+                    if self.env.hold_only and not in_hold_phase(step):
+                        logger.info(f"Hold phase over at step {step}")
+                    self.env.hold_only = in_hold_phase(step)
                     obs, _ = self.env.reset()
                     ep_return = 0.0
                     ep_len = 0
@@ -519,6 +652,16 @@ class TQCTrainer:
                             + self.transition_stats.format_matrix(self.env.goal_labels)
                         )
                         self.transition_stats = TransitionStats(len(self._goals))
+                        if self.env.hold_only or cfg.env.hold_prob > 0:
+                            scales = "  ".join(
+                                f"{lab} {s:.2f}"
+                                for lab, s in zip(
+                                    self.env.goal_labels,
+                                    self.env.hold_scale,
+                                    strict=True,
+                                )
+                            )
+                            logger.info(f"hold start perturbation (rad): {scales}")
                 if step % cfg.checkpoint_every == 0:
                     self.save(cfg.checkpoint_dir / f"tqc_{step:07d}.pt")
                     self.save(cfg.checkpoint_dir / "tqc_latest.pt", with_buffer=True)

@@ -68,6 +68,42 @@ def parse_args() -> argparse.Namespace:
         "chosen from --links)",
     )
     parser.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="With --goals: warm-start from a plain swing-up TQC checkpoint "
+        "(network size and physics come from it; the goal inputs start at zero "
+        "weight, so training begins from the swing-up policy).",
+    )
+    parser.add_argument(
+        "--seed-steps",
+        type=int,
+        default=None,
+        help="Fill the replay buffer with this many steps of the warm-started "
+        "policy before training (default: 100000 with --init-from, else 0)",
+    )
+    parser.add_argument(
+        "--target-entropy",
+        type=float,
+        default=None,
+        help="SAC entropy target in force units (default: log(force_max) - 1, "
+        "the -1 convention on the [-1, 1]-scaled action)",
+    )
+    parser.add_argument(
+        "--hold-prob",
+        type=float,
+        default=0.0,
+        help="With --goals: probability a reset starts near an equilibrium and "
+        "must hold it (perturbation grows as holding succeeds)",
+    )
+    parser.add_argument(
+        "--hold-phase-steps",
+        type=int,
+        default=0,
+        help="With --goals: first N env steps are hold-only episodes "
+        "(stabilize every configuration before learning transitions)",
+    )
+    parser.add_argument(
         "--resume",
         type=Path,
         default=None,
@@ -83,6 +119,10 @@ def main() -> None:
     args = parse_args()
     if args.links < 1:
         raise SystemExit(f"--links must be >= 1, got {args.links}")
+    if args.init_from is not None and (not args.goals or args.resume is not None):
+        raise SystemExit(
+            "--init-from needs --goals and cannot be combined with --resume"
+        )
 
     checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name(
         args.links
@@ -94,6 +134,7 @@ def main() -> None:
             n_links=args.links,
             goal_conditioned=args.goals,
             max_steps=args.max_steps or (3000 if args.goals else 1000),
+            hold_prob=args.hold_prob,
         ),
         device=args.device,
         hidden=args.hidden,
@@ -103,9 +144,27 @@ def main() -> None:
         n_quantiles=args.n_quantiles,
         top_quantiles_to_drop=args.drop,
         symmetry_augment=not args.no_symmetry,
+        target_entropy=args.target_entropy,
+        hold_phase_steps=args.hold_phase_steps,
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )
+    if args.init_from is not None:
+        # The warm-started network must have the source's shape and physics.
+        src = torch.load(args.init_from, map_location="cpu", weights_only=False)["cfg"]
+        cfg = dataclasses.replace(
+            cfg,
+            hidden=src.hidden,
+            n_critics=src.n_critics,
+            n_quantiles=src.n_quantiles,
+            env=dataclasses.replace(
+                cfg.env, physics=src.env.physics, hardware=src.env.hardware
+            ),
+        )
+        logger.info(
+            f"Network/physics from {args.init_from}: hidden={src.hidden}, "
+            f"{src.n_critics} critics x {src.n_quantiles} atoms"
+        )
     if args.resume is not None:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         if ckpt.get("algo") != "tqc":
@@ -119,6 +178,13 @@ def main() -> None:
     trainer = TQCTrainer(cfg)
     if args.resume is not None:
         trainer.load(args.resume)
+    if args.init_from is not None:
+        trainer.warm_start(args.init_from)
+    seed_steps = args.seed_steps
+    if seed_steps is None:
+        seed_steps = 100_000 if args.init_from is not None else 0
+    if seed_steps > 0:
+        trainer.seed_buffer(seed_steps)
     logger.info(
         f"TQC: {cfg.n_critics} critics x {cfg.n_quantiles} atoms, "
         f"drop {cfg.top_quantiles_to_drop}, symmetry={cfg.symmetry_augment}"

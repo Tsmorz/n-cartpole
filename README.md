@@ -132,6 +132,21 @@ Training logs a start × goal success table, and `task plot` adds a
 transition-success panel. On hardware, `env.set_goal("DU")` is the command
 input.
 
+**Recommended: start from the swing-up policy.** Rather than learning from
+scratch, warm-start the goal network from a plain swing-up checkpoint. The goal
+inputs start at zero weight, so it begins as the swing-up policy, and its
+rollouts seed the replay buffer (relabeled to every goal). A hold phase then
+teaches it to stabilize each configuration from growing perturbations before
+the transitions are mixed in:
+
+```bash
+task train -- --goals --init-from checkpoints/double/tqc/tqc_latest.pt \
+  --hold-phase-steps 100000 --hold-prob 0.25 --steps 1000000
+
+# swing-up timing for a goal-conditioned checkpoint (goal fixed to UU)
+uv run python scripts/eval_swingup.py --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt
+```
+
 ## Development
 
 | Command                   | Description                                                                                         |

@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         type=Path,
         default=Path("checkpoints/double/tqc/tqc_latest.pt"),
-        help="Path to checkpoint file (non-goal-conditioned swing-up policy)",
+        help="Swing-up checkpoint; a goal-conditioned one is commanded --goal",
     )
     parser.add_argument("--trials", type=int, default=10, help="Number of episodes")
     parser.add_argument(
@@ -42,6 +42,13 @@ def parse_args() -> argparse.Namespace:
         help="Max rad/s (and m/s for the cart) of the low-energy starting velocity",
     )
     parser.add_argument("--seed", type=int, default=0, help="Base random seed")
+    parser.add_argument(
+        "--goal",
+        type=str,
+        default=None,
+        help="Goal-conditioned checkpoints only: target label (default all-up, "
+        "e.g. UU)",
+    )
     return parser.parse_args()
 
 
@@ -49,21 +56,27 @@ def main() -> None:
     """Load the checkpoint, roll out randomized near-hanging starts, report timing."""
     args = parse_args()
     bundle = load_policy(args.checkpoint)
-    if bundle.goal_conditioned:
-        raise ValueError(
-            f"{args.checkpoint} is goal-conditioned; use scripts/eval_transitions.py"
-        )
+    goal = args.goal or "U" * bundle.n_links
+    # Goal-conditioned: one fixed goal for the whole episode, from all-down.
+    options = {"start": "D" * bundle.n_links, "goal": goal}
 
     dt = bundle.physics.dt
     cfg = dataclasses.replace(
         bundle.env_config, max_steps=int(round(args.seconds / dt))
     )
+    if bundle.goal_conditioned:
+        cfg = dataclasses.replace(cfg, goal_hold_steps=None)
+    elif args.goal is not None:
+        raise ValueError("--goal needs a goal-conditioned checkpoint")
     env = make_env(cfg)
     rng = np.random.default_rng(args.seed)
 
     times: list[float] = []
     for trial in range(args.trials):
-        env.reset(seed=int(rng.integers(2**31)))
+        env.reset(
+            seed=int(rng.integers(2**31)),
+            options=options if bundle.goal_conditioned else None,
+        )
         state = env.get_state()
         state[0] = 0.0
         state[1] = rng.uniform(-args.vel_noise, args.vel_noise)
@@ -77,7 +90,7 @@ def main() -> None:
 
         # `env.settled`/`_at_goal` bookkeeping only runs on the goal-conditioned
         # step() path, so a plain swing-up policy never updates it; track the
-        # same "at goal" condition locally instead (upright within
+        # same "at goal" condition locally instead (at the goal within
         # ``goal_tol_angle``/``goal_tol_vel`` for ``goal_settle_steps`` in a row).
         swing_up_time: float | None = None
         settled_steps = 0

@@ -423,3 +423,139 @@ def test_play_goal_schedule(tmp_path: Path) -> None:
     np.testing.assert_allclose(goals[0], [np.pi, np.pi])
     np.testing.assert_allclose(goals[-1], [0.0, 0.0])
     assert torch.is_tensor(bundle.normalize(np.zeros((1, bundle.obs_dim))))
+
+
+# ---------------------------------------------------------------------------
+# Hold curriculum, warm start, entropy target
+# ---------------------------------------------------------------------------
+
+
+def test_hold_reset_starts_near_goal_and_holds_it() -> None:
+    """A hold start sits near an equilibrium and commands that same goal."""
+    env = _goal_env(hold_prob=1.0)
+    env.hold_scale[:] = 0.3
+    for seed in range(8):
+        env.reset(seed=seed)
+        dth = np.angle(np.exp(1j * (env.get_state()[2::2] - env.goal_angles)))
+        assert np.all(np.abs(dth) <= 0.3 + env.cfg.init_noise)
+        assert env._hold_seg and env._seg_from == FROM_OTHER
+
+
+def test_pinned_reset_ignores_hold_prob() -> None:
+    """Evaluation/replay resets pin start or goal and never become holds."""
+    env = _goal_env(hold_prob=1.0)
+    env.reset(seed=0, options={"start": "DD", "goal": "UU"})
+    assert env.goal == "UU" and not env._hold_seg
+
+
+def test_hold_scale_adapts_to_outcome() -> None:
+    """A held segment widens that equilibrium's perturbation; a failure narrows it."""
+    env = _goal_env(hold_prob=1.0, goal_hold_steps=(60, 60), hold_noise=(0.05, 1.0))
+    env.hold_scale[:] = 0.1
+    env.reset(seed=0)
+    env._state[:] = 0.0  # force a DD hold at rest for a guaranteed success
+    env._state[2::2] = np.pi
+    env._begin_segment(3, FROM_OTHER)
+    env._hold_seg = True
+    for _ in range(60):
+        _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
+    assert info["hold"] == (3, True)
+    assert env.hold_scale[3] == pytest.approx(0.1 * env.HOLD_GROW)
+
+    env._update_hold_scale(False)
+    assert env.hold_scale[3] == pytest.approx(0.1 * env.HOLD_GROW / env.HOLD_SHRINK)
+    for _ in range(100):
+        env._update_hold_scale(False)
+    assert env.hold_scale[3] == pytest.approx(0.05)  # clamped to the minimum
+
+
+def test_hold_only_episode_ends_with_its_segment() -> None:
+    """In hold-only mode the episode truncates when the hold segment closes."""
+    env = _goal_env(goal_hold_steps=(30, 30))
+    env.hold_only = True
+    env.reset(seed=1)
+    goal = env.goal
+    env._state[:] = 0.0  # exactly at the hold equilibrium: never leaves the rail
+    env._state[2::2] = env.goal_angles
+    for _ in range(29):
+        _, _, _, trunc, _ = env.step(np.array([0.0], dtype=np.float32))
+        assert not trunc
+    _, _, term, trunc, info = env.step(np.array([0.0], dtype=np.float32))
+    assert trunc and not term and "segment" in info
+    assert env.goal == goal  # no switch to a new goal
+
+
+def test_default_target_entropy_is_in_force_units(tmp_path: Path) -> None:
+    """Default target = -1 on the [-1, 1] action, converted to newtons."""
+    trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path))
+    fmax = trainer.cfg.env.physics.force_max
+    assert trainer.target_entropy == pytest.approx(math.log(fmax) - 1.0)
+    trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path, target_entropy=-1.0))
+    assert trainer.target_entropy == -1.0
+
+
+def test_goal_switch_transition_bootstraps_under_old_goal(tmp_path: Path) -> None:
+    """The stored next_obs keeps the goal the transition was rewarded for."""
+    trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path))
+    env = trainer.env
+    obs, _ = env.reset(seed=0, options={"start": "DD", "goal": "DD"})
+    env._seg_len = 1  # switch after the next step ...
+    env._sample_goal = lambda frm: 0  # type: ignore[method-assign]  # ... to UU
+    next_obs, *_, info = trainer._store_step(env, obs, np.zeros(1, np.float32))
+    assert "segment" in info and env.goal == "UU"
+    np.testing.assert_array_equal(next_obs[trainer._goal_slice], [1.0, 1.0])
+    stored = trainer.buffer.next_obs[trainer.buffer.size - 1]
+    np.testing.assert_array_equal(stored[trainer._goal_slice], [-1.0, -1.0])
+
+
+def test_warm_start_reproduces_source_policy(tmp_path: Path) -> None:
+    """A warm-started goal net acts like the plain source, whatever the goal."""
+    src = TQCTrainer(TQCConfig(device="cpu", hidden=32, n_quantiles=8, buffer_size=10))
+    src.norm.update(torch.randn(64, obs_dim(2)) * 2 + 1)
+    with torch.no_grad():
+        src.log_alpha.fill_(-3.0)
+    src.save(tmp_path / "src.pt")
+
+    goal = TQCTrainer(_tiny_tqc_cfg(tmp_path))
+    goal.warm_start(tmp_path / "src.pt")
+    assert goal.resumed and goal.alpha.item() == pytest.approx(math.exp(-3.0))
+
+    kin = np.random.default_rng(0).normal(size=(5, obs_dim(2))).astype(np.float32)
+    with torch.no_grad():
+        ref_mean, _ = src.actor._mean_logstd(src.norm.normalize(torch.as_tensor(kin)))
+        ref_q = src.critic(src.norm.normalize(torch.as_tensor(kin)), torch.ones(5, 1))
+        for g in ([1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0]):
+            o = np.concatenate([kin, np.tile(g, (5, 1))], axis=1).astype(np.float32)
+            x = goal.norm.normalize(torch.as_tensor(o))
+            mean, _ = goal.actor._mean_logstd(x)
+            torch.testing.assert_close(mean, ref_mean)
+            torch.testing.assert_close(goal.critic(x, torch.ones(5, 1)), ref_q)
+
+
+def test_warm_start_rejects_mismatches(tmp_path: Path) -> None:
+    """Goal checkpoints and differently shaped networks can't warm-start."""
+    goal = TQCTrainer(_tiny_tqc_cfg(tmp_path))
+    goal.save(tmp_path / "goal.pt")
+    with pytest.raises(ValueError, match="already goal-conditioned"):
+        goal.warm_start(tmp_path / "goal.pt")
+    wide = TQCTrainer(TQCConfig(device="cpu", hidden=64, n_quantiles=8, buffer_size=10))
+    wide.save(tmp_path / "wide.pt")
+    with pytest.raises(ValueError, match="hidden"):
+        goal.warm_start(tmp_path / "wide.pt")
+
+
+def test_seed_buffer_stores_raw_transitions(tmp_path: Path) -> None:
+    """Seeding fills the buffer (with raw states) and leaves the env's stats alone."""
+    trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path))
+    trainer.seed_buffer(50)
+    assert trainer.buffer.size == 50
+    assert np.any(trainer.buffer.state[:50] != 0)
+    assert trainer.env.transition_stats.count.sum() == 0
+    assert int(trainer.norm.count) == 50
+
+
+def test_hold_phase_switches_off(tmp_path: Path) -> None:
+    """Training uses hold-only episodes until hold_phase_steps, then transitions."""
+    trainer = TQCTrainer(_tiny_tqc_cfg(tmp_path, hold_phase_steps=60))
+    trainer.train()
+    assert not trainer.env.hold_only

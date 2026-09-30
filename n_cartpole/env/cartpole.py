@@ -94,6 +94,15 @@ class EnvConfig:
     goal_tol_angle: float = 0.3
     goal_tol_vel: float = 1.5
     goal_settle_steps: int = 50
+    # Hold curriculum: with this probability a reset starts *near* a random
+    # equilibrium and commands that same configuration, so the policy learns to
+    # stabilize every pose, not just move between them. 0 = off.
+    hold_prob: float = 0.0
+    # (min, max) angle perturbation (rad) of a hold start; joint velocities get
+    # up to twice that in rad/s. Each equilibrium's scale starts at min, grows
+    # after a held segment and shrinks after a failed one (a self-paced reverse
+    # curriculum: the catch region is widened only as fast as it is mastered).
+    hold_noise: tuple[float, float] = (0.05, 1.0)
 
 
 # Reward constants (shared by the env and the vectorized ``goal_reward`` used for
@@ -303,6 +312,10 @@ class NPendulumCartpole(gym.Env):
     SHAPING_WEIGHT: ClassVar[float] = SHAPING_WEIGHT
     # Max fractional reward lost to command chatter (see ``r_rate``).
     RATE_PENALTY: ClassVar[float] = RATE_PENALTY
+    # Hold-curriculum scale factors: x1.05 per held segment, /1.1 per failure,
+    # which settles where ~2/3 of hold segments succeed.
+    HOLD_GROW: ClassVar[float] = 1.05
+    HOLD_SHRINK: ClassVar[float] = 1.1
 
     def __init__(self, config: EnvConfig | None = None) -> None:
         """Initialize the environment."""
@@ -356,6 +369,13 @@ class NPendulumCartpole(gym.Env):
         self._seg_steps = 0  # steps since the current goal was commanded
         self._seg_len = 0  # steps until the next automatic goal switch
         self._settled = 0  # consecutive steps spent at the goal
+        # Hold curriculum: per-equilibrium start perturbation (rad), and whether
+        # the current segment is a hold started by ``_reset_hold``. With
+        # ``hold_only`` (set by the trainer for a stabilize-first phase) every
+        # unpinned reset is a hold and the episode ends with that segment.
+        self.hold_scale = np.full(len(self.goal_configs), self.cfg.hold_noise[0])
+        self.hold_only = False
+        self._hold_seg = False
 
         # Action delay buffer: holds the last ``delay_steps`` commands; the oldest
         # is applied to the plant each step.  None when no delay is configured.
@@ -375,8 +395,10 @@ class NPendulumCartpole(gym.Env):
         """Reset to hanging-down (swing-up) or, with ``init_random_prob``, anywhere.
 
         In goal-conditioned mode the non-random start is any equilibrium and the
-        first goal is drawn (curriculum-weighted) for it. ``options`` may pin
-        either: ``{"start": "DD", "goal": "UU"}`` (labels or indices).
+        first goal is drawn (curriculum-weighted) for it; with ``hold_prob`` (or
+        ``hold_only``) it is instead a perturbed equilibrium commanded to hold.
+        ``options`` may pin either: ``{"start": "DD", "goal": "UU"}`` (labels or
+        indices); pinning disables the hold start.
 
         When hardware is configured, the sysID context is resampled from the
         hardware nominal params plus measurement noise once per episode.
@@ -433,6 +455,17 @@ class NPendulumCartpole(gym.Env):
         cfg = self.cfg
         n_goals = len(self.goal_configs)
         start = options.get("start")
+        goal = options.get("goal")
+        if (
+            start is None
+            and goal is None
+            and (
+                self.hold_only
+                or (cfg.hold_prob > 0 and self.np_random.random() < cfg.hold_prob)
+            )
+        ):
+            self._reset_hold()
+            return
         if start is None and self.np_random.random() < cfg.init_random_prob:
             self._state = self._random_state()
             frm = FROM_OTHER
@@ -447,9 +480,33 @@ class NPendulumCartpole(gym.Env):
             self._state = base + self.np_random.uniform(
                 -cfg.init_noise, cfg.init_noise, self.state_dim
             )
-        goal = options.get("goal")
         gi = goal_index(goal, self.n_links) if goal is not None else None
         self._begin_segment(self._sample_goal(frm) if gi is None else gi, frm)
+
+    def _reset_hold(self) -> None:
+        """Start near a random equilibrium, perturbed at its scale, and hold it.
+
+        The segment counts as ``FROM_OTHER`` (it did not start settled); its
+        outcome adapts ``hold_scale`` for that equilibrium.
+        """
+        cfg = self.cfg
+        gi = int(self.np_random.integers(len(self.goal_configs)))
+        s = self.hold_scale[gi]
+        state = np.zeros(self.state_dim, dtype=np.float64)
+        state[2::2] = self.goal_configs[gi]
+        state += self.np_random.uniform(-cfg.init_noise, cfg.init_noise, self.state_dim)
+        state[2::2] += self.np_random.uniform(-s, s, self.n_links)
+        state[3::2] += self.np_random.uniform(-2.0 * s, 2.0 * s, self.n_links)
+        self._state = state
+        self._begin_segment(gi, FROM_OTHER)
+        self._hold_seg = True
+
+    def _update_hold_scale(self, ok: bool) -> None:
+        """Widen the current equilibrium's hold perturbation on success, else narrow."""
+        lo, hi = self.cfg.hold_noise
+        g = self._goal_idx
+        s = self.hold_scale[g] * (self.HOLD_GROW if ok else 1.0 / self.HOLD_SHRINK)
+        self.hold_scale[g] = float(np.clip(s, lo, hi))
 
     def _sample_goal(self, frm: int) -> int:
         """Draw the next goal, oversampling transitions that still fail."""
@@ -470,6 +527,7 @@ class NPendulumCartpole(gym.Env):
         self._seg_from = frm
         self._seg_steps = 0
         self._settled = 0
+        self._hold_seg = False
         hold = self.cfg.goal_hold_steps
         self._seg_len = (
             int(self.np_random.integers(hold[0], hold[1] + 1))
@@ -567,6 +625,8 @@ class NPendulumCartpole(gym.Env):
             info.update(self._goal_info())
             if self._advance_segment(terminated, truncated, info):
                 obs = self._make_obs()  # the next action should see the new goal
+            # A hold-only episode is exactly one hold segment.
+            truncated = truncated or (self.hold_only and "segment" in info)
         return obs, reward, terminated, truncated, info
 
     def _advance_segment(
@@ -575,7 +635,9 @@ class NPendulumCartpole(gym.Env):
         """Track goal progress; close the segment and maybe switch goals.
 
         A closed segment is reported as ``info["segment"] = (from, to, success)``
-        and recorded in ``transition_stats``. Returns True if the goal changed.
+        and recorded in ``transition_stats``; a closed hold segment also adapts
+        ``hold_scale`` and is reported as ``info["hold"] = (goal, success)``.
+        Returns True if the goal changed.
         """
         self._seg_steps += 1
         self._settled = self._settled + 1 if self._at_goal(self._state) else 0
@@ -589,7 +651,11 @@ class NPendulumCartpole(gym.Env):
         seg = (self._seg_from, self._goal_idx, ok)
         info["segment"] = seg
         self.transition_stats.record(*seg)
-        if not switch or terminated or truncated:
+        if self._hold_seg:
+            self._update_hold_scale(ok)
+            info["hold"] = (self._goal_idx, ok)
+            self._hold_seg = False
+        if not switch or terminated or truncated or self.hold_only:
             return False
         frm = self._goal_idx if ok else FROM_OTHER
         self._begin_segment(self._sample_goal(frm), frm)
