@@ -321,8 +321,12 @@ class NPendulumCartpole(gym.Env):
 
         # Upright alignment — product over links (all must be up to score high).
         r_angle = self._angle_potential(state)
-        # Cart centered on the rail (x normalized by the rail half-length).
-        r_pos = 0.5 + 0.5 * np.exp(-0.7 * (x / p.x_lim) ** 2)
+        # Cart centered on the rail (x normalized by the rail half-length). Gated
+        # by upright alignment like the velocity term: free to travel during
+        # swing-up, but once balanced the cart is pulled back toward x=0. Bounded
+        # to [0.5, 1]; the sharper falloff (k=4) penalizes even modest offsets.
+        pos_pen = np.exp(-4.0 * (x / p.x_lim) ** 2)
+        r_pos = 1.0 - 0.5 * r_angle * (1.0 - pos_pen)
         # Velocity penalty GATED by upright alignment: spinning is free during
         # swing-up (r_angle≈0) and penalized only near the top (r_angle≈1), so the
         # reward rewards *balancing* without fighting the energy pumping needed to
