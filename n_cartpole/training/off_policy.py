@@ -297,6 +297,7 @@ class TQCTrainer:
                     )
                 if step % cfg.checkpoint_every == 0:
                     self.save(cfg.checkpoint_dir / f"tqc_{step:07d}.pt")
+                    self.save(cfg.checkpoint_dir / "tqc_latest.pt")
         except KeyboardInterrupt:
             logger.info("\nTQC training interrupted.")
         finally:
