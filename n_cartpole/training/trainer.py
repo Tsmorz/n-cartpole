@@ -234,6 +234,7 @@ class Trainer:
                 "ret_norm": self.ret_norm.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "cfg": self.cfg,
+                "algo": "ppo",
             },
             path,
         )
@@ -417,7 +418,7 @@ class Trainer:
                     )
 
                 if iteration % cfg.checkpoint_every == 0:
-                    self.save(cfg.checkpoint_dir / f"iter_{iteration:05d}.pt")
+                    self.save(cfg.checkpoint_dir / f"ppo_iter_{iteration:05d}.pt")
 
         except KeyboardInterrupt:
             interrupted = True
@@ -427,11 +428,13 @@ class Trainer:
                 q.put("stop")
             for p in procs:
                 p.join(timeout=5)
-            self.save(cfg.checkpoint_dir / "latest.pt")
+            self.save(cfg.checkpoint_dir / "ppo_latest.pt")
             self.save_return_history(cfg.checkpoint_dir / "returns.csv")
             self.save_metrics_history(cfg.checkpoint_dir / "metrics.csv")
 
         if interrupted:
-            logger.info("Resume with: task train -- --resume checkpoints/latest.pt")
+            logger.info(
+                f"Resume with: task train -- --resume {cfg.checkpoint_dir / 'ppo_latest.pt'}"
+            )
         else:
             logger.info("Training complete.")

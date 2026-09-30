@@ -71,7 +71,19 @@ class DoublePendulumCartpole(gym.Env):
         and little force is used. The angle factor is a PRODUCT over both links,
         so partial credit for a single upright pole is suppressed; the velocity
         factor rewards actually balancing rather than spinning through upright.
-        Always positive → well-scaled returns (no value normalization needed).
+        Nearly always positive and tightly bounded → well-scaled returns without
+        value normalization. The shaping term below can occasionally push the
+        total slightly negative (down to -SHAPING_WEIGHT) when alignment
+        regresses, but the reward stays in a small fixed range regardless.
+
+        On top of that base reward, a potential-based shaping term rewards
+        *progress* toward upright every step, using r_angle itself as the
+        potential Φ(s) (Ng, Harada & Russell, "Policy invariance under reward
+        transformations," ICML 1999): F(s,s') = γ·Φ(s') − Φ(s). This is provably
+        policy-invariant — it cannot change which policy is optimal — but it
+        turns "getting closer to upright" into immediate reward rather than
+        something the agent only discovers once it stumbles into the top, which
+        is what makes swing-up happen sooner during training.
 
     Episode ends when:
         - terminated: |x| > x_lim (cart out of bounds)
@@ -82,6 +94,15 @@ class DoublePendulumCartpole(gym.Env):
 
     OBS_DIM: ClassVar[int] = 8
     N_LINKS: ClassVar[int] = 2
+
+    # Discount for the potential-based shaping term (Ng et al. 1999). Matches the
+    # PPO/TQC training discount (gamma=0.99) so the telescoping sum of shaping
+    # rewards over an episode is γ·Φ(s_T) − Φ(s_0), consistent with how the value
+    # function actually discounts.
+    SHAPING_GAMMA: ClassVar[float] = 0.99
+    # Weight on the shaping term relative to the base [0,1]-bounded reward. Small
+    # enough that the base multiplicative reward still dominates return scale.
+    SHAPING_WEIGHT: ClassVar[float] = 0.2
 
     def __init__(self, config: EnvConfig | None = None) -> None:
         """Initialize the environment."""
@@ -139,6 +160,7 @@ class DoublePendulumCartpole(gym.Env):
                 [0.0, 0.0, np.pi, 0.0, np.pi, 0.0], dtype=np.float64
             ) + self.np_random.uniform(-noise, noise, 6)
         self._step_count = 0
+        self._prev_potential = self._angle_potential(self._state)
         return _encode_obs(self._state), {}
 
     def step(
@@ -159,17 +181,24 @@ class DoublePendulumCartpole(gym.Env):
 
         return obs, reward, terminated, truncated, {}
 
+    def _angle_potential(self, state: np.ndarray) -> float:
+        """Upright-alignment product over links, in [0, 1]; used as the shaping
+        potential Φ(s) as well as the base reward's r_angle factor.
+        """
+        th1, th2 = state[2], state[4]
+        return float((0.5 + 0.5 * np.cos(th1)) * (0.5 + 0.5 * np.cos(th2)))
+
     def _compute_reward(self, state: np.ndarray, F: float) -> float:
-        """Bounded multiplicative reward in (0, 1].
+        """Bounded multiplicative reward in (0, 1], plus potential-based shaping.
 
         Mirror-invariant by construction (every factor depends on x², cos θ, θ̇²,
         or a²), which keeps the symmetry augmentation used in training valid.
         """
-        x, th1, th1d, th2, th2d = state[0], state[2], state[3], state[4], state[5]
+        x, th1d, th2d = state[0], state[3], state[5]
         p = self.cfg.physics
 
         # Upright alignment — product over links (both must be up to score high).
-        r_angle = (0.5 + 0.5 * np.cos(th1)) * (0.5 + 0.5 * np.cos(th2))
+        r_angle = self._angle_potential(state)
         # Cart centered on the rail (x normalized by the rail half-length).
         r_pos = 0.5 + 0.5 * np.exp(-0.7 * (x / p.x_lim) ** 2)
         # Velocity penalty GATED by upright alignment: spinning is free during
@@ -182,7 +211,16 @@ class DoublePendulumCartpole(gym.Env):
         a = F / p.force_max
         r_act = 0.8 + 0.2 * max(1.0 - a**2, 0.0)
 
-        return float(r_angle * r_pos * r_vel * r_act)
+        base = r_angle * r_pos * r_vel * r_act
+
+        # Potential-based shaping (Ng et al. 1999): F(s,s') = γ·Φ(s') − Φ(s), with
+        # Φ = r_angle. Rewards progress toward upright every step instead of only
+        # at the top, so swing-up is discovered — and reinforced — sooner, without
+        # changing the optimal policy.
+        shaping = self.SHAPING_GAMMA * r_angle - self._prev_potential
+        self._prev_potential = r_angle
+
+        return float(base + self.SHAPING_WEIGHT * shaping)
 
     def get_state(self) -> np.ndarray:
         """Return the current raw physics state (6D)."""

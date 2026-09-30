@@ -34,11 +34,16 @@ class SquashedGaussianActor(nn.Module):
     ACT_DIM = 1
 
     def __init__(
-        self, hidden: int = 256, force_max: float = 20.0, blocks: int = 2
+        self,
+        hidden: int = 256,
+        force_max: float = 20.0,
+        blocks: int = 2,
+        obs_dim: int | None = None,
     ) -> None:
         """Build the policy network for the given action bound."""
         super().__init__()
-        self.net = _mlp(self.OBS_DIM, hidden, 2 * self.ACT_DIM, n_blocks=blocks)
+        self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
+        self.net = _mlp(self.obs_dim, hidden, 2 * self.ACT_DIM, n_blocks=blocks)
         self.force_max = float(force_max)
 
     def _mean_logstd(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -81,13 +86,15 @@ class QuantileCritic(nn.Module):
         n_critics: int = 2,
         n_quantiles: int = 25,
         blocks: int = 2,
+        obs_dim: int | None = None,
     ) -> None:
         """Build ``n_critics`` quantile heads."""
         super().__init__()
+        self.obs_dim = obs_dim if obs_dim is not None else self.OBS_DIM
         self.n_critics = n_critics
         self.n_quantiles = n_quantiles
         self.nets = nn.ModuleList(
-            _mlp(self.OBS_DIM + self.ACT_DIM, hidden, n_quantiles, n_blocks=blocks)
+            _mlp(self.obs_dim + self.ACT_DIM, hidden, n_quantiles, n_blocks=blocks)
             for _ in range(n_critics)
         )
 

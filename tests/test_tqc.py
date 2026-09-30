@@ -47,7 +47,7 @@ def test_quantile_huber_loss_nonnegative_and_zero_at_match() -> None:
 
 def test_replay_buffer_add_and_sample() -> None:
     """Buffer stores transitions and samples correctly shaped batches."""
-    buf = ReplayBuffer(capacity=100)
+    buf = ReplayBuffer(capacity=100, obs_dim=8)
     for _ in range(50):
         buf.add(np.zeros(8), np.zeros(1), 0.5, np.ones(8), False)
     assert buf.size == 50

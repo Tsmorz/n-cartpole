@@ -52,8 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("checkpoints"),
-        help="Checkpoint directory",
+        default=None,
+        help="Checkpoint directory (default: checkpoints/<single|double>/ppo, "
+        "chosen from --links)",
     )
     parser.add_argument(
         "--resume", type=Path, default=None, help="Resume from checkpoint path"
@@ -71,6 +72,9 @@ def main() -> None:
     """Build TrainingConfig, instantiate Trainer, and run."""
     args = parse_args()
 
+    links_name = "single" if args.links == 1 else "double"
+    checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name / "ppo"
+
     cfg = TrainingConfig(
         env=EnvConfig(physics=PhysicsParams(), n_links=args.links),
         device=args.device,
@@ -78,7 +82,7 @@ def main() -> None:
         hidden=args.hidden,
         lr=args.lr,
         n_iterations=args.iterations,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
     )
     if args.workers is not None:
         cfg.n_workers = args.workers

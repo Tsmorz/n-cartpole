@@ -15,12 +15,22 @@ from n_cartpole.viz.plots import plot_training_curves
 
 
 def _default_csv() -> Path:
-    """Pick metrics.csv if present, else returns.csv, under checkpoints/."""
-    ckpt = Path("checkpoints")
-    for name in ("metrics.csv", "returns.csv"):
-        if (ckpt / name).exists():
-            return ckpt / name
-    return ckpt / "metrics.csv"
+    """Pick the newest metrics.csv (else returns.csv) under checkpoints/**/."""
+    candidates = sorted(
+        Path("checkpoints").glob("*/*/metrics.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    candidates = sorted(
+        Path("checkpoints").glob("*/*/returns.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
+    return Path("checkpoints") / "double" / "ppo" / "metrics.csv"
 
 
 def parse_args() -> argparse.Namespace:

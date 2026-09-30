@@ -13,21 +13,25 @@ The package name is `n_cartpole`. Physics are simulated with a Lagrangian-derive
 Uses uv + a Taskfile (go-task). Python 3.13 required. Runtime deps in `[project.dependencies]`; dev tooling (pytest, ruff, mypy, pre-commit) in `[dependency-groups.dev]`.
 
 ```bash
-task init                                # uv sync
-task train                               # PPO (on-policy), default settings
-task train -- --workers 6 --steps 500   # PPO with custom args
-task train-tqc                           # TQC (off-policy, distributional)
-task train-tqc -- --steps 300000         # TQC with custom args
-task play -- --checkpoint checkpoints/latest.pt  # interactive HTML replay (auto PPO/TQC)
-task plot                                # interactive training dashboard (metrics.csv)
-task policy-map                          # input→output force/value control-surface map
-task format                              # ruff format + ruff check --fix + mypy
-task test                                # pytest with coverage over n_cartpole/
-task ci                                  # format + test (local CI mirror)
-task clean                               # remove .venv, caches, checkpoints
+task init                                       # uv sync
+task train                                      # PPO (on-policy), default settings (--links 2)
+task train -- --links 1 --workers 6 --steps 500 # PPO, single-link warm-up, custom args
+task train-tqc                                  # TQC (off-policy, distributional), --links 2
+task train-tqc -- --links 1 --steps 300000      # TQC with custom args
+task play -- --checkpoint checkpoints/double/ppo/ppo_latest.pt   # interactive HTML replay (auto PPO/TQC, auto link count)
+task plot -- --csv checkpoints/double/ppo/metrics.csv            # interactive training dashboard
+task policy-map -- --checkpoint checkpoints/double/ppo/ppo_latest.pt  # input→output force/value control-surface map
+task format                                     # ruff format + ruff check --fix + mypy
+task test                                       # pytest with coverage over n_cartpole/
+task ci                                         # format + test (local CI mirror)
+task clean                                      # remove .venv, caches, checkpoints
 ```
 
-Two learners share the environment: **PPO** (`scripts/train.py`, `training/trainer.py`, `policy/ppo.py`) and **TQC** (`scripts/train_tqc.py`, `training/off_policy.py`, `policy/tqc.py`). TQC is off-policy and sample-efficient (Lee et al.'s algorithm); PPO is the on-policy baseline. Neither replaces the other — the PPO path is kept intact.
+Two learners share the environment: **PPO** (`scripts/train.py`, `training/trainer.py`, `policy/ppo.py`) and **TQC** (`scripts/train_tqc.py`, `training/off_policy.py`, `policy/tqc.py`). TQC is off-policy and sample-efficient (Lee et al.'s algorithm); PPO is the on-policy baseline. Neither replaces the other — the PPO path is kept intact. Both take `--links {1,2}` (`n_cartpole/env/factory.py` picks `SinglePendulumCartpole`/`DoublePendulumCartpole` and their obs dim/mirror-sign accordingly) and default to 2 (double).
+
+**Checkpoint naming and layout**: checkpoints live under `checkpoints/<single|double>/<ppo|tqc>/`, chosen automatically from `--links` (override with `--checkpoint-dir`). The folder tells you the link count and algorithm; filenames are algo-prefixed on top of that — `ppo_latest.pt`, `ppo_iter_NNNNN.pt`, `tqc_latest.pt`, `tqc_NNNNNNN.pt` — so a bare filename never has to be interpreted against its parent directory to know what it is. Every checkpoint embeds its full `TrainingConfig`/`TQCConfig` (including `env.n_links`) plus an `"algo"` key, so `policy/loader.py::load_policy()` and therefore `scripts/play.py` / `scripts/policy_map.py` reconstruct the right network shape (`n_cartpole/env/factory.py::env_spec()`) from the checkpoint alone — replay and the policy map work for any checkpoint regardless of which folder it's opened from. `policy/tqc.py`'s `SquashedGaussianActor`/`QuantileCritic` take an `obs_dim` override for this (default 8, for backward compatibility with pre-existing double-link checkpoints and `tests/test_tqc.py`).
+
+**Publishing checkpoints**: `checkpoints/` is gitignored — never commit `.pt` files. Pretrained models are distributed via GitHub Releases, built by `.github/workflows/release-models.yml`: a 2-job matrix pipeline (`train` × `{single, double}` → `release`) that trains fresh PPO + TQC checkpoints for both link counts on `ubuntu-latest`, zips each `checkpoints/<links>/<algo>/` folder (`single-ppo.zip`, `single-tqc.zip`, `double-ppo.zip`, `double-tqc.zip`, each including a demo `replay.html`), uploads them as build artifacts, then a second job downloads all four and publishes them to a GitHub Release via `softprops/action-gh-release`. Triggers: pushing a tag matching `models-v*`, or `workflow_dispatch` (inputs: `tag`, `iterations`, `tqc_steps`, `draft`) for a manual/dry-run release. `task download-models [-- <tag>]` fetches and unzips a release's checkpoints back into `checkpoints/` via `gh release download`. If you touch `scripts/train.py`/`scripts/train_tqc.py`'s CLI flags or the checkpoint directory convention, update this workflow's `--links`/`--iterations`/`--steps` invocations to match.
 
 Run a single test:
 ```bash
@@ -39,8 +43,11 @@ uv run pytest tests/test_dynamics.py::test_energy_conservation -v
 ```
 n_cartpole/
   env/
-    dynamics.py         — mass_matrix(), rhs() with friction, step() — pure numpy + scipy
+    dynamics.py         — mass_matrix(), rhs() with friction, step() — pure numpy + scipy (double-link)
+    single_dynamics.py  — single-link analogue of dynamics.py
     double_cartpole.py  — gymnasium.Env; obs encoding, bounded reward, diverse reset, OBS_MIRROR_SIGN
+    single_cartpole.py  — single-link gymnasium.Env, same conventions, OBS_DIM=5
+    factory.py           — make_env()/env_spec(): pick single vs. double from EnvConfig.n_links
   policy/
     actor_critic.py     — PPO Actor, Critic MLPs + RunningNorm observation normalizer
     ppo.py              — compute_gae(), ppo_update() (return-norm + target_kl) — stateless

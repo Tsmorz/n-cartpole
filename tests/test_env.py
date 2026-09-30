@@ -66,26 +66,41 @@ def test_cos_sin_unit_circle(env: DoublePendulumCartpole) -> None:
 
 
 def test_reward_range(env: DoublePendulumCartpole) -> None:
-    """Bounded multiplicative reward must lie in (0, 1]."""
+    """Reward = bounded multiplicative base in (0, 1] + potential-based shaping.
+
+    The shaping term F(s,s') = γ·Φ(s') − Φ(s) (Φ = r_angle ∈ [0, 1]) can go
+    slightly negative when alignment regresses, so the total reward's tight
+    bound is [-SHAPING_WEIGHT, 1 + SHAPING_WEIGHT·SHAPING_GAMMA], not (0, 1].
+    """
     env.reset(seed=0)
     rng = np.random.default_rng(0)
+    w, g = env.SHAPING_WEIGHT, env.SHAPING_GAMMA
+    lo, hi = -w - 1e-6, 1.0 + w * g + 1e-6
     for _ in range(50):
         action = rng.uniform(-1.0, 1.0, (1,)).astype(np.float32)
         _, reward, terminated, truncated, _ = env.step(action)
-        assert 0.0 <= reward <= 1.0 + 1e-6, f"reward {reward} out of (0, 1]"
+        assert lo <= reward <= hi, f"reward {reward} out of [{lo}, {hi}]"
         if terminated or truncated:
             env.reset()
 
 
 def test_reward_max_at_upright_centered() -> None:
-    """Reward approaches 1.0 only when both poles are upright, centered, at rest."""
+    """Reward approaches 1.0 only when both poles are upright, centered, at rest.
+
+    Sets ``_prev_potential`` to match each probed state's own potential before
+    calling ``_compute_reward``, isolating the base multiplicative reward from
+    the potential-based shaping term (which depends on the *previous* state and
+    is ~0 at steady state, up to the (1-γ)·Φ drag of a discounted potential).
+    """
     env = DoublePendulumCartpole()
     env.reset(seed=0)
     env._state = np.zeros(6)  # both upright, centered, zero velocity
+    env._prev_potential = env._angle_potential(env._state)
     r_up = env._compute_reward(env._state, 0.0)
     env._state = np.array([0.0, 0.0, np.pi, 0.0, np.pi, 0.0])  # both hanging down
+    env._prev_potential = env._angle_potential(env._state)
     r_down = env._compute_reward(env._state, 0.0)
-    assert r_up == pytest.approx(1.0, abs=1e-6)
+    assert r_up == pytest.approx(1.0, abs=0.01)
     assert r_down < 0.05
 
 

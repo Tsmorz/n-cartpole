@@ -15,11 +15,8 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
-from n_cartpole.env.double_cartpole import (
-    OBS_MIRROR_SIGN,
-    DoublePendulumCartpole,
-    EnvConfig,
-)
+from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.factory import env_spec, make_env
 from n_cartpole.policy.actor_critic import RunningNorm
 from n_cartpole.policy.tqc import (
     QuantileCritic,
@@ -28,7 +25,6 @@ from n_cartpole.policy.tqc import (
 )
 from n_cartpole.training.trainer import _resolve_device
 
-OBS_DIM = 8
 ACT_DIM = 1
 
 
@@ -61,13 +57,13 @@ class TQCConfig:
 class ReplayBuffer:
     """Fixed-capacity circular replay buffer of transitions."""
 
-    def __init__(self, capacity: int) -> None:
+    def __init__(self, capacity: int, obs_dim: int) -> None:
         """Preallocate storage for ``capacity`` transitions."""
         self.capacity = capacity
-        self.obs = np.zeros((capacity, OBS_DIM), dtype=np.float32)
+        self.obs = np.zeros((capacity, obs_dim), dtype=np.float32)
         self.act = np.zeros((capacity, ACT_DIM), dtype=np.float32)
         self.rew = np.zeros((capacity, 1), dtype=np.float32)
-        self.next_obs = np.zeros((capacity, OBS_DIM), dtype=np.float32)
+        self.next_obs = np.zeros((capacity, obs_dim), dtype=np.float32)
         self.done = np.zeros((capacity, 1), dtype=np.float32)
         self.ptr = 0
         self.size = 0
@@ -113,15 +109,18 @@ class TQCTrainer:
             f"TQC training device: {self.device} (requested: {self.cfg.device})"
         )
 
+        obs_dim, mirror_sign = env_spec(self.cfg.env.n_links)
         fmax = self.cfg.env.physics.force_max
-        self.actor = SquashedGaussianActor(self.cfg.hidden, fmax).to(self.device)
+        self.actor = SquashedGaussianActor(
+            self.cfg.hidden, fmax, obs_dim=obs_dim
+        ).to(self.device)
         self.critic = QuantileCritic(
-            self.cfg.hidden, self.cfg.n_critics, self.cfg.n_quantiles
+            self.cfg.hidden, self.cfg.n_critics, self.cfg.n_quantiles, obs_dim=obs_dim
         ).to(self.device)
         self.critic_target = copy.deepcopy(self.critic).to(self.device)
         for p in self.critic_target.parameters():
             p.requires_grad_(False)
-        self.norm = RunningNorm(OBS_DIM).to(self.device)
+        self.norm = RunningNorm(obs_dim).to(self.device)
 
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=self.cfg.lr)
@@ -131,9 +130,9 @@ class TQCTrainer:
         self.log_alpha = torch.zeros(1, device=self.device, requires_grad=True)
         self.alpha_opt = torch.optim.Adam([self.log_alpha], lr=self.cfg.lr)
 
-        self.buffer = ReplayBuffer(self.cfg.buffer_size)
-        self.env = DoublePendulumCartpole(self.cfg.env)
-        self._mirror = torch.as_tensor(OBS_MIRROR_SIGN, device=self.device)
+        self.buffer = ReplayBuffer(self.cfg.buffer_size, obs_dim)
+        self.env = make_env(self.cfg.env)
+        self._mirror = torch.as_tensor(mirror_sign, device=self.device)
 
     @property
     def alpha(self) -> torch.Tensor:

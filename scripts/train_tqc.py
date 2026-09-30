@@ -21,6 +21,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train a TQC (off-policy) policy for double cartpole swing-up."
     )
+    parser.add_argument(
+        "--links",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="Number of pendulum links: 1 (single, warm-up) or 2 (double).",
+    )
     parser.add_argument("--steps", type=int, default=200_000, help="Total env steps")
     parser.add_argument("--hidden", type=int, default=256, help="MLP hidden size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate")
@@ -43,8 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        default=Path("checkpoints"),
-        help="Checkpoint dir",
+        default=None,
+        help="Checkpoint directory (default: checkpoints/<single|double>/tqc, "
+        "chosen from --links)",
     )
     return parser.parse_args()
 
@@ -52,8 +60,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Build TQCConfig, instantiate TQCTrainer, and run."""
     args = parse_args()
+
+    links_name = "single" if args.links == 1 else "double"
+    checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name / "tqc"
+
     cfg = TQCConfig(
-        env=EnvConfig(physics=PhysicsParams()),
+        env=EnvConfig(physics=PhysicsParams(), n_links=args.links),
         device=args.device,
         hidden=args.hidden,
         lr=args.lr,
@@ -63,7 +75,7 @@ def main() -> None:
         top_quantiles_to_drop=args.drop,
         symmetry_augment=not args.no_symmetry,
         total_steps=args.steps,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
     )
     trainer = TQCTrainer(cfg)
     logger.info(

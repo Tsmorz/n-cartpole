@@ -47,7 +47,10 @@ class SinglePendulumCartpole(gym.Env):
         Bounded, multiplicative shaping in (0, 1] (same style as the two-link
         env): r = r_angle * r_pos * r_vel * r_act, each factor in [~0.5, 1] or
         [0, 1]; the product peaks at 1.0 only when the pole is upright, the cart
-        is centered, angular velocity is low, and little force is used.
+        is centered, angular velocity is low, and little force is used. On top
+        of that, a potential-based shaping term (Ng, Harada & Russell, ICML
+        1999) rewards progress toward upright every step — see double_cartpole.py
+        for the full rationale; same Φ = r_angle, same γ and weight.
 
     Episode ends when:
         - terminated: |x| > x_lim (cart out of bounds)
@@ -58,6 +61,9 @@ class SinglePendulumCartpole(gym.Env):
 
     OBS_DIM: ClassVar[int] = 5
     N_LINKS: ClassVar[int] = 1
+
+    SHAPING_GAMMA: ClassVar[float] = 0.99
+    SHAPING_WEIGHT: ClassVar[float] = 0.2
 
     def __init__(self, config: EnvConfig | None = None) -> None:
         """Initialize the environment."""
@@ -106,6 +112,7 @@ class SinglePendulumCartpole(gym.Env):
                 [0.0, 0.0, np.pi, 0.0], dtype=np.float64
             ) + self.np_random.uniform(-noise, noise, 4)
         self._step_count = 0
+        self._prev_potential = self._angle_potential(self._state)
         return _encode_obs(self._state), {}
 
     def step(
@@ -126,12 +133,21 @@ class SinglePendulumCartpole(gym.Env):
 
         return obs, reward, terminated, truncated, {}
 
+    def _angle_potential(self, state: np.ndarray) -> float:
+        """Upright-alignment term, in [0, 1]; used as the shaping potential Φ(s)
+        as well as the base reward's r_angle factor.
+        """
+        th1 = state[2]
+        return float(0.5 + 0.5 * np.cos(th1))
+
     def _compute_reward(self, state: np.ndarray, F: float) -> float:
-        """Bounded multiplicative reward in (0, 1] (mirror-invariant)."""
-        x, th1, th1d = state[0], state[2], state[3]
+        """Bounded multiplicative reward in (0, 1] (mirror-invariant), plus
+        potential-based shaping (see class docstring / double_cartpole.py).
+        """
+        x, th1d = state[0], state[3]
         p = self.cfg.physics
 
-        r_angle = 0.5 + 0.5 * np.cos(th1)
+        r_angle = self._angle_potential(state)
         r_pos = 0.5 + 0.5 * np.exp(-0.7 * (x / p.x_lim) ** 2)
         # Velocity penalty GATED by upright alignment: spinning is free during
         # swing-up (align≈0) and penalized only near the top (align≈1), so the
@@ -142,7 +158,12 @@ class SinglePendulumCartpole(gym.Env):
         a = F / p.force_max
         r_act = 0.8 + 0.2 * max(1.0 - a**2, 0.0)
 
-        return float(r_angle * r_pos * r_vel * r_act)
+        base = r_angle * r_pos * r_vel * r_act
+
+        shaping = self.SHAPING_GAMMA * r_angle - self._prev_potential
+        self._prev_potential = r_angle
+
+        return float(base + self.SHAPING_WEIGHT * shaping)
 
     def get_state(self) -> np.ndarray:
         """Return the current raw physics state (4D)."""

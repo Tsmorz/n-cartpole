@@ -26,7 +26,7 @@ def test_trainer_runs_without_error(tiny_cfg: TrainingConfig) -> None:
     """Full training loop must complete two iterations and save a checkpoint."""
     trainer = Trainer(tiny_cfg)
     trainer.train()
-    assert (tiny_cfg.checkpoint_dir / "latest.pt").exists()
+    assert (tiny_cfg.checkpoint_dir / "ppo_latest.pt").exists()
 
 
 def test_trainer_checkpoint_loadable(tiny_cfg: TrainingConfig) -> None:
@@ -35,4 +35,4 @@ def test_trainer_checkpoint_loadable(tiny_cfg: TrainingConfig) -> None:
     trainer.train()
 
     fresh = Trainer(tiny_cfg)
-    fresh.load(tiny_cfg.checkpoint_dir / "latest.pt")
+    fresh.load(tiny_cfg.checkpoint_dir / "ppo_latest.pt")

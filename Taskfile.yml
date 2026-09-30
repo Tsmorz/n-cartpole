@@ -23,9 +23,44 @@ tasks:
       - uv run python scripts/train_tqc.py {{.CLI_ARGS}}
 
   play:
-    desc: "Run a trained policy and open an interactive HTML replay; args: task play -- --checkpoint checkpoints/latest.pt"
+    desc: "Run a trained policy and open an interactive HTML replay; args: task play -- --checkpoint checkpoints/double/ppo/ppo_latest.pt"
     cmds:
       - uv run python scripts/play.py {{.CLI_ARGS}}
+
+  package-models:
+    desc: "Zip locally trained checkpoints/<links>/<algo>/ into dist/*.zip"
+    cmds:
+      - |
+        set -e
+        mkdir -p dist
+        rm -f dist/*.zip
+        for links in single double; do
+          for algo in ppo tqc; do
+            dir="checkpoints/$links/$algo"
+            if [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+              (cd checkpoints && zip -rq "../dist/${links}-${algo}.zip" "$links/$algo")
+              echo "packaged dist/${links}-${algo}.zip"
+            fi
+          done
+        done
+        if [ -z "$(ls -A dist/*.zip 2>/dev/null)" ]; then
+          echo "No checkpoints found under checkpoints/<single|double>/<ppo|tqc>/ — train first." >&2
+          exit 1
+        fi
+
+  release-models:
+    desc: "Package local checkpoints, tag, and publish as a GitHub Release; args: task release-models -- models-v1"
+    cmds:
+      - task: package-models
+      - git tag {{.CLI_ARGS}}
+      - git push origin {{.CLI_ARGS}}
+      - gh release create {{.CLI_ARGS}} dist/*.zip --repo Tsmorz/n-cartpole --generate-notes
+
+  download-models:
+    desc: "Download a models release from GitHub into checkpoints/; args: task download-models -- models-v1"
+    cmds:
+      - gh release download {{.CLI_ARGS}} --repo Tsmorz/n-cartpole --dir checkpoints --clobber --pattern "*.zip"
+      - for f in checkpoints/*.zip; do unzip -o "$f" -d checkpoints && rm "$f"; done
 
   plot:
     desc: "Render the interactive training dashboard from checkpoints/metrics.csv"

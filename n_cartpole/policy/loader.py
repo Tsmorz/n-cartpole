@@ -77,7 +77,9 @@ def load_policy(checkpoint: str | Path, device: str = "cpu") -> PolicyBundle:
 
     value: ValueFn | None = None
     if algo == "tqc":
-        tqc_actor = SquashedGaussianActor(hidden=hidden, force_max=physics.force_max)
+        tqc_actor = SquashedGaussianActor(
+            hidden=hidden, force_max=physics.force_max, obs_dim=obs_dim
+        )
         tqc_actor.load_state_dict(ckpt["actor"])
         tqc_actor.eval()
 
@@ -86,7 +88,7 @@ def load_policy(checkpoint: str | Path, device: str = "cpu") -> PolicyBundle:
                 return tqc_actor.act(obs_norm, deterministic=True).cpu().numpy()
 
         if "critic" in ckpt:
-            tqc_critic = QuantileCritic(hidden=hidden)
+            tqc_critic = QuantileCritic(hidden=hidden, obs_dim=obs_dim)
             tqc_critic.load_state_dict(ckpt["critic"])
             tqc_critic.eval()
 

@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("checkpoints/latest.pt"),
+        default=Path("checkpoints/double/ppo/ppo_latest.pt"),
         help="Path to checkpoint file",
     )
     parser.add_argument(
