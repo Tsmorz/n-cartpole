@@ -597,7 +597,7 @@ def test_settle_metrics_for_held_equilibrium() -> None:
 
     cfg = EnvConfig(goal_conditioned=True, goal_hold_steps=None, max_steps=300)
     env = NPendulumCartpole(cfg)
-    trial, seg = _rollout(Zero(), env, start=3, goal=3, seed=0)  # DD → DD
+    trial, seg = _rollout(Zero(), env, start=3, goal=3, seed=0)  # type: ignore[arg-type]  # DD → DD
     assert trial.success and seg is not None and seg[2]
     assert trial.settle_time == 0.0
     assert trial.hold_rms_force == 0.0 and trial.peak_force == 0.0

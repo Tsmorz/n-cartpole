@@ -33,7 +33,7 @@ tasks:
       - uv run python scripts/eval_swingup.py {{.CLI_ARGS}}
 
   export-web:
-    desc: "Export the swing-up actor + physics for the personal site's browser demo; args: task export-web -- --checkpoint checkpoints/double/tqc/tqc_latest.pt --out-dir ../personal-site/assets/models"
+    desc: "Export the goal-conditioned (default) or swing-up actor + physics for the personal site's browser demo; args: task export-web -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --out-dir ../personal-site/assets/models"
     cmds:
       - uv run python scripts/export_web.py {{.CLI_ARGS}}
 
