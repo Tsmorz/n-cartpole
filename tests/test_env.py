@@ -68,7 +68,7 @@ def test_cos_sin_unit_circle(env: DoublePendulumCartpole) -> None:
 def test_reward_range(env: DoublePendulumCartpole) -> None:
     """Reward = bounded multiplicative base in (0, 1] + potential-based shaping.
 
-    The shaping term F(s,s') = γ·Φ(s') − Φ(s) (Φ = r_angle ∈ [0, 1]) can go
+    The shaping term F(s,s') = g*P(s') - P(s) (P = r_angle in [0, 1]) can go
     slightly negative when alignment regresses, so the total reward's tight
     bound is [-SHAPING_WEIGHT, 1 + SHAPING_WEIGHT·SHAPING_GAMMA], not (0, 1].
     """
@@ -90,7 +90,7 @@ def test_reward_max_at_upright_centered() -> None:
     Sets ``_prev_potential`` to match each probed state's own potential before
     calling ``_compute_reward``, isolating the base multiplicative reward from
     the potential-based shaping term (which depends on the *previous* state and
-    is ~0 at steady state, up to the (1-γ)·Φ drag of a discounted potential).
+    is ~0 at steady state, up to the (1-g)*P drag of a discounted potential).
     """
     env = DoublePendulumCartpole()
     env.reset(seed=0)

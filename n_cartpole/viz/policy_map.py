@@ -24,15 +24,20 @@ from plotly.subplots import make_subplots
 from n_cartpole.policy.loader import PolicyBundle
 from n_cartpole.viz import style
 
-# Raw-state layout: [x, ẋ, θ₁, θ̇₁, θ₂, θ̇₂]. Per-dim label + default sweep range.
-_DIMS: dict[int, tuple[str, tuple[float, float]]] = {
-    0: ("cart x (m)", (-0.5, 0.5)),
-    1: ("cart ẋ (m/s)", (-3.0, 3.0)),
-    2: ("θ₁ (rad)", (-np.pi, np.pi)),
-    3: ("θ̇₁ (rad/s)", (-8.0, 8.0)),
-    4: ("θ₂ (rad)", (-np.pi, np.pi)),
-    5: ("θ̇₂ (rad/s)", (-8.0, 8.0)),
-}
+
+def _dim_labels(n_links: int) -> dict[int, tuple[str, tuple[float, float]]]:
+    """Per-dim label + default sweep range for a raw ``2 + 2n`` state.
+
+    Layout: ``[x, ẋ, θ₁, θ̇₁, θ₂, θ̇₂, ...]`` (one angle/rate pair per link).
+    """
+    dims: dict[int, tuple[str, tuple[float, float]]] = {
+        0: ("cart x (m)", (-0.5, 0.5)),
+        1: ("cart ẋ (m/s)", (-3.0, 3.0)),
+    }
+    for k in range(n_links):
+        dims[2 + 2 * k] = (f"θ{k + 1} (rad)", (-np.pi, np.pi))
+        dims[3 + 2 * k] = (f"θ̇{k + 1} (rad/s)", (-8.0, 8.0))
+    return dims
 
 
 def _evaluate(
@@ -93,6 +98,7 @@ def plot_policy_map(
     if slider_dim is not None and slider_dim >= state_dim:
         slider_dim = None  # not present for this link count
 
+    _DIMS = _dim_labels(bundle.n_links)
     nominal = np.zeros(state_dim)  # upright, centered, at rest
     gx = np.linspace(*_DIMS[dim_x][1], resolution)
     gy = np.linspace(*_DIMS[dim_y][1], resolution)

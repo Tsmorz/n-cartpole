@@ -15,15 +15,13 @@ from loguru import logger
 from n_cartpole.policy.loader import load_policy
 from n_cartpole.viz.policy_map import plot_policy_map
 
-# Friendly names for the raw-state indices, accepted on the CLI.
-_DIM_NAMES = {
-    "x": 0,
-    "xdot": 1,
-    "theta1": 2,
-    "theta1dot": 3,
-    "theta2": 4,
-    "theta2dot": 5,
-}
+# Friendly names for the raw-state indices, accepted on the CLI. Generated for
+# enough links to cover any reasonable rig; raw integer indices also work.
+_MAX_NAMED_LINKS = 8
+_DIM_NAMES = {"x": 0, "xdot": 1}
+for _k in range(_MAX_NAMED_LINKS):
+    _DIM_NAMES[f"theta{_k + 1}"] = 2 + 2 * _k
+    _DIM_NAMES[f"theta{_k + 1}dot"] = 3 + 2 * _k
 
 
 def _dim(value: str) -> int:
@@ -35,7 +33,7 @@ def _dim(value: str) -> int:
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    choices = list(_DIM_NAMES) + [str(i) for i in range(6)]
+    names = list(_DIM_NAMES)
     parser = argparse.ArgumentParser(
         description="Visualize the policy input→output map."
     )
@@ -50,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         type=_dim,
         default="theta1",
         metavar="DIM",
-        help=f"x-axis state dim ({', '.join(choices)})",
+        help=f"x-axis state dim (a name like {', '.join(names[:6])}, … or a raw index)",
     )
     parser.add_argument(
         "--y",

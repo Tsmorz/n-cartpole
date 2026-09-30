@@ -186,7 +186,7 @@ class Trainer:
         self.device = _resolve_device(self.cfg.device)
         logger.info(f"Training device: {self.device} (requested: {self.cfg.device})")
 
-        self.obs_dim, self.mirror_sign = env_spec(self.cfg.env.n_links)
+        self.obs_dim, self.mirror_sign = env_spec(self.cfg.env)
         logger.info(f"Links: {self.cfg.env.n_links} | observation dim: {self.obs_dim}")
         # Per-iteration mean episode return, for the training curve.
         self.return_history: list[float] = []

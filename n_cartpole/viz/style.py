@@ -65,6 +65,21 @@ SEQUENTIAL = [
 _FONT = "-apple-system, Segoe UI, Helvetica, Arial, sans-serif"
 
 
+def link_color(k: int) -> str:
+    """Return the categorical color for pendulum link ``k`` (0-indexed).
+
+    Links 0 and 1 reuse the POLE1/POLE2 roles; higher links cycle the remaining
+    categorical slots (skipping the reward/force hues where possible).
+    """
+    if k == 0:
+        return POLE1
+    if k == 1:
+        return POLE2
+    # Remaining slots for links 3+: yellow, magenta, green, violet, red, aqua.
+    extra = (SERIES[3], SERIES[4], SERIES[5], SERIES[6], SERIES[7], SERIES[2])
+    return extra[(k - 2) % len(extra)]
+
+
 def rgba(hex_color: str, alpha: float) -> str:
     """`#rrggbb` -> `rgba(r,g,b,alpha)` for translucent fills/bands."""
     h = hex_color.lstrip("#")

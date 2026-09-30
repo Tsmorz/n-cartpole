@@ -58,20 +58,29 @@ works regardless of which folder it lives in.
 **Pretrained models.** `checkpoints/` is gitignored (binary, environment-specific,
 trivially reproducible) — pretrained weights are published as
 [GitHub Releases](https://github.com/Tsmorz/n-cartpole/releases) instead, each
-release carrying four zips (`single-ppo.zip`, `single-tqc.zip`, `double-ppo.zip`,
-`double-tqc.zip`), one per link-count/algorithm combination, built by the
-[Release models](.github/workflows/release-models.yml) workflow. Fetch and unpack
-the latest release into `checkpoints/` with:
+release carrying up to four zips (`single-ppo.zip`, `single-tqc.zip`,
+`double-ppo.zip`, `double-tqc.zip`), one per link-count/algorithm combination
+you've trained locally. Nothing trains in CI — releases are built and published
+entirely from your machine. Fetch and unpack the latest release into
+`checkpoints/` with:
 
 ```bash
 task download-models                 # latest release
 task download-models -- models-v1    # a specific tag
 ```
 
-To cut a new release: push a tag matching `models-v*` (e.g. `git tag models-v1 &&
-git push origin models-v1`), or run the workflow manually from the Actions tab
-for a dry run — both retrain PPO and TQC for both link counts from scratch and
-attach the zips (plus a demo replay HTML in each) to the release.
+To cut a new release (requires the [GitHub CLI](https://cli.github.com/),
+authenticated with `gh auth login`): train locally as usual, then run
+
+```bash
+task release-models -- models-v1
+```
+
+which zips whatever's under `checkpoints/<single|double>/<ppo|tqc>/`
+(`task package-models` alone, if you just want the zips in `dist/` without
+tagging/publishing), tags and pushes `models-v1`, and runs
+`gh release create` to publish the zips it found — only the combinations you
+actually trained are included.
 
 **Visualization.** Every view renders to a self-contained, interactive **Plotly**
 HTML page (hover, zoom, play/scrub) — no static PNGs. `task play` gives a scrub-able
@@ -103,6 +112,8 @@ and the diverse initial-state distribution described below.
 | `task train-tqc` | Train the TQC policy (`--links {1,2}`) |
 | `task play` | Interactive HTML replay of a trained policy |
 | `task download-models` | Download a models release into `checkpoints/` |
+| `task package-models` | Zip local checkpoints into `dist/` |
+| `task release-models` | Package, tag, and publish local checkpoints as a GitHub Release |
 | `task plot` | Interactive training dashboard from `metrics.csv` |
 | `task policy-map` | Interactive input→output (force/value) control-surface map |
 | `task test` | Run tests with coverage |

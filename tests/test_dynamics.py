@@ -22,8 +22,8 @@ def params() -> PhysicsParams:
 
 
 def test_mass_matrix_shape(params: PhysicsParams) -> None:
-    """Mass matrix should be 3x3."""
-    M = mass_matrix(0.0, 0.0, params)
+    """Mass matrix should be 3x3 for a 2-link rig."""
+    M = mass_matrix(np.array([0.0, 0.0]), params)
     assert M.shape == (3, 3)
 
 
@@ -31,8 +31,8 @@ def test_mass_matrix_symmetric(params: PhysicsParams) -> None:
     """Mass matrix must be symmetric."""
     rng = np.random.default_rng(0)
     for _ in range(20):
-        th1, th2 = rng.uniform(-np.pi, np.pi, 2)
-        M = mass_matrix(th1, th2, params)
+        theta = rng.uniform(-np.pi, np.pi, 2)
+        M = mass_matrix(theta, params)
         np.testing.assert_allclose(M, M.T, atol=1e-12)
 
 
@@ -40,12 +40,10 @@ def test_mass_matrix_positive_definite(params: PhysicsParams) -> None:
     """Mass matrix must be positive definite (all eigenvalues > 0)."""
     rng = np.random.default_rng(1)
     for _ in range(50):
-        th1, th2 = rng.uniform(-np.pi, np.pi, 2)
-        M = mass_matrix(th1, th2, params)
+        theta = rng.uniform(-np.pi, np.pi, 2)
+        M = mass_matrix(theta, params)
         eigvals = np.linalg.eigvalsh(M)
-        assert np.all(eigvals > 0), (
-            f"Non-positive eigenvalue at th1={th1:.2f}, th2={th2:.2f}"
-        )
+        assert np.all(eigvals > 0), f"Non-positive eigenvalue at theta={theta}"
 
 
 def test_step_returns_correct_shape(params: PhysicsParams) -> None:
@@ -57,7 +55,7 @@ def test_step_returns_correct_shape(params: PhysicsParams) -> None:
 
 def test_energy_conservation_zero_force() -> None:
     """Frictionless, with zero applied force, total mechanical energy is conserved."""
-    p = PhysicsParams(b=0.0, c1=0.0, c2=0.0)  # energy only conserves frictionless
+    p = PhysicsParams(b=0.0, joint_friction=0.0)  # energy only conserves frictionless
     rng = np.random.default_rng(42)
     state = np.array(
         [0.0, 0.2, rng.uniform(-np.pi, np.pi), 0.5, rng.uniform(-np.pi, np.pi), -0.3]

@@ -109,11 +109,11 @@ class TQCTrainer:
             f"TQC training device: {self.device} (requested: {self.cfg.device})"
         )
 
-        obs_dim, mirror_sign = env_spec(self.cfg.env.n_links)
+        obs_dim, mirror_sign = env_spec(self.cfg.env)
         fmax = self.cfg.env.physics.force_max
-        self.actor = SquashedGaussianActor(
-            self.cfg.hidden, fmax, obs_dim=obs_dim
-        ).to(self.device)
+        self.actor = SquashedGaussianActor(self.cfg.hidden, fmax, obs_dim=obs_dim).to(
+            self.device
+        )
         self.critic = QuantileCritic(
             self.cfg.hidden, self.cfg.n_critics, self.cfg.n_quantiles, obs_dim=obs_dim
         ).to(self.device)

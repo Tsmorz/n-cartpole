@@ -7,8 +7,9 @@ from pathlib import Path
 
 from loguru import logger
 
-from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
+from n_cartpole.env.factory import links_name
 from n_cartpole.training.trainer import Trainer, TrainingConfig
 
 
@@ -21,8 +22,8 @@ def parse_args() -> argparse.Namespace:
         "--links",
         type=int,
         default=2,
-        choices=[1, 2],
-        help="Number of pendulum links: 1 (single, warm-up) or 2 (double).",
+        help="Number of pendulum links (>=1): 1 (single, warm-up), 2 (double), "
+        "3 (triple), 4 (quadruple), ...",
     )
     parser.add_argument(
         "--workers", type=int, default=None, help="Number of rollout workers"
@@ -53,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint-dir",
         type=Path,
         default=None,
-        help="Checkpoint directory (default: checkpoints/<single|double>/ppo, "
+        help="Checkpoint directory (default: checkpoints/<single|double|triple|…>/ppo, "
         "chosen from --links)",
     )
     parser.add_argument(
@@ -71,9 +72,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Build TrainingConfig, instantiate Trainer, and run."""
     args = parse_args()
+    if args.links < 1:
+        raise SystemExit(f"--links must be >= 1, got {args.links}")
 
-    links_name = "single" if args.links == 1 else "double"
-    checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name / "ppo"
+    checkpoint_dir = (
+        args.checkpoint_dir or Path("checkpoints") / links_name(args.links) / "ppo"
+    )
 
     cfg = TrainingConfig(
         env=EnvConfig(physics=PhysicsParams(), n_links=args.links),

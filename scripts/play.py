@@ -8,9 +8,8 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
-from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
+from n_cartpole.env.cartpole import EnvConfig, NPendulumCartpole
 from n_cartpole.env.factory import make_env
-from n_cartpole.env.single_cartpole import SinglePendulumCartpole
 from n_cartpole.policy.loader import PolicyBundle, load_policy
 from n_cartpole.viz.animate import animate_episode
 
@@ -47,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_episode(
     bundle: PolicyBundle,
-    env: DoublePendulumCartpole | SinglePendulumCartpole,
+    env: NPendulumCartpole,
     seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Roll out one deterministic episode.

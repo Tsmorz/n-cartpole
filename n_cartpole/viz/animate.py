@@ -23,18 +23,24 @@ from n_cartpole.viz import style
 _MAX_FRAMES = 300  # cap animation frames so the HTML stays light and smooth
 
 
-def _geometry(state: np.ndarray, p: PhysicsParams, n_links: int) -> tuple[float, ...]:
-    """Return (cart_x, x1, y1, x2, y2) tip coordinates for one raw state."""
-    x, th1 = float(state[0]), float(state[2])
-    x1 = x + p.l1 * np.sin(th1)
-    y1 = p.l1 * np.cos(th1)
-    if n_links == 2:
-        th2 = float(state[4])
-        x2 = x1 + p.l2 * np.sin(th2)
-        y2 = y1 + p.l2 * np.cos(th2)
-    else:
-        x2, y2 = x1, y1
-    return x, x1, y1, x2, y2
+def _joint_coords(
+    state: np.ndarray, p: PhysicsParams, n_links: int
+) -> tuple[list[float], list[float]]:
+    """Return the ``(xs, ys)`` of every joint for one raw state.
+
+    ``xs[0], ys[0]`` is the cart pivot; ``xs[k+1], ys[k+1]`` is the tip of link
+    ``k``. Length ``n_links + 1``.
+    """
+    lengths = p.link_lengths(n_links)
+    px, py = float(state[0]), 0.0
+    xs, ys = [px], [py]
+    for k in range(n_links):
+        th = float(state[2 + 2 * k])
+        px = px + lengths[k] * np.sin(th)
+        py = py + lengths[k] * np.cos(th)
+        xs.append(px)
+        ys.append(py)
+    return xs, ys
 
 
 def _cart_shape(cx: float, w: float, h: float) -> tuple[list[float], list[float]]:
@@ -59,7 +65,7 @@ def animate_episode(
     """Render an interactive replay of a recorded episode.
 
     Args:
-        states:   (T, 4) single or (T, 6) double raw physics states.
+        states:   (T, 2+2n) raw physics states (n links).
         params:   physics parameters (defaults if None).
         dt:       simulation timestep (s).
         save_path: if given, write an ``.html`` file here.
@@ -76,15 +82,16 @@ def animate_episode(
     p = params or PhysicsParams()
     states = np.asarray(states)
     T = len(states)
-    n_links = 1 if states.shape[1] == 4 else 2
+    n_links = (states.shape[1] - 2) // 2
     t = np.arange(T) * dt
     t_ctrl = np.arange(T - 1) * dt
 
     # --- Telemetry panels (right column): (name, x, y, color, extra) ---------
     panels: list[dict] = []
-    up_traces = [("θ₁ upright", np.cos(states[:, 2]), style.POLE1)]
-    if n_links == 2:
-        up_traces.append(("θ₂ upright", np.cos(states[:, 4]), style.POLE2))
+    up_traces = [
+        (f"θ{k + 1} upright", np.cos(states[:, 2 + 2 * k]), style.link_color(k))
+        for k in range(n_links)
+    ]
     panels.append(
         {
             "title": "Uprightness (cos θ)",
@@ -142,7 +149,7 @@ def animate_episode(
 
     # --- Physical scene (left) — static scenery via shapes -------------------
     track_half = p.x_lim + 0.4
-    reach = p.l1 + (p.l2 if n_links == 2 else 0.0) + 0.25
+    reach = float(np.sum(p.link_lengths(n_links))) + 0.25
     fig.add_shape(
         type="line",
         x0=-track_half,
@@ -167,8 +174,8 @@ def animate_episode(
         )
 
     cart_w, cart_h = 0.34, 0.12
-    x0, x1, y1, x2, y2 = _geometry(states[0], p, n_links)
-    cxs, cys = _cart_shape(x0, cart_w, cart_h)
+    xs0, ys0 = _joint_coords(states[0], p, n_links)
+    cxs, cys = _cart_shape(xs0[0], cart_w, cart_h)
 
     # Animated physical traces (order fixed → referenced in frames by index).
     fig.add_trace(
@@ -187,38 +194,25 @@ def animate_episode(
         col=1,
     )
     idx_cart = len(fig.data) - 1
-    fig.add_trace(
-        go.Scatter(
-            x=[x0, x1],
-            y=[0, y1],
-            mode="lines+markers",
-            line={"color": style.POLE1, "width": 6},
-            marker={"size": 9, "color": style.POLE1},
-            hoverinfo="skip",
-            showlegend=False,
-            name="link 1",
-        ),
-        row=1,
-        col=1,
-    )
-    idx_pole1 = len(fig.data) - 1
-    idx_pole2 = None
-    if n_links == 2:
+    # One trace per link (thinner/smaller markers for outer links).
+    idx_poles: list[int] = []
+    for k in range(n_links):
+        color = style.link_color(k)
         fig.add_trace(
             go.Scatter(
-                x=[x1, x2],
-                y=[y1, y2],
+                x=[xs0[k], xs0[k + 1]],
+                y=[ys0[k], ys0[k + 1]],
                 mode="lines+markers",
-                line={"color": style.POLE2, "width": 5},
-                marker={"size": 7, "color": style.POLE2},
+                line={"color": color, "width": max(3, 6 - k)},
+                marker={"size": max(5, 9 - k), "color": color},
                 hoverinfo="skip",
                 showlegend=False,
-                name="link 2",
+                name=f"link {k + 1}",
             ),
             row=1,
             col=1,
         )
-        idx_pole2 = len(fig.data) - 1
+        idx_poles.append(len(fig.data) - 1)
 
     fig.update_xaxes(
         range=[-track_half, track_half], showgrid=False, zeroline=False, row=1, col=1
@@ -305,19 +299,16 @@ def animate_episode(
     if frame_ids[-1] != T - 1:
         frame_ids.append(T - 1)
 
-    animated = [idx_cart, idx_pole1] + ([idx_pole2] if idx_pole2 is not None else [])
+    animated = [idx_cart, *idx_poles]
     animated += cursor_idx
 
     frames = []
     for fi in frame_ids:
-        cx, gx1, gy1, gx2, gy2 = _geometry(states[fi], p, n_links)
-        cxs, cys = _cart_shape(cx, cart_w, cart_h)
-        data = [
-            go.Scatter(x=cxs, y=cys),
-            go.Scatter(x=[cx, gx1], y=[0, gy1]),
-        ]
-        if idx_pole2 is not None:
-            data.append(go.Scatter(x=[gx1, gx2], y=[gy1, gy2]))
+        xs, ys = _joint_coords(states[fi], p, n_links)
+        cxs, cys = _cart_shape(xs[0], cart_w, cart_h)
+        data = [go.Scatter(x=cxs, y=cys)]
+        for k in range(n_links):
+            data.append(go.Scatter(x=[xs[k], xs[k + 1]], y=[ys[k], ys[k + 1]]))
         tt = float(fi * dt)
         for pl in panels:
             data.append(go.Scatter(x=[tt, tt], y=_cursor_range(pl)))

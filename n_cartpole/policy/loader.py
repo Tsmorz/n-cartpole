@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
 from n_cartpole.env.factory import env_spec
 from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
@@ -70,7 +71,8 @@ def load_policy(checkpoint: str | Path, device: str = "cpu") -> PolicyBundle:
     hidden = cfg.hidden if cfg is not None else 128
     physics = cfg.env.physics if cfg is not None else PhysicsParams()
     n_links = getattr(cfg.env, "n_links", 2) if cfg is not None else 2
-    obs_dim, _ = env_spec(n_links)
+    env_config = cfg.env if cfg is not None else EnvConfig(n_links=n_links)
+    obs_dim, _ = env_spec(env_config)
 
     norm = RunningNorm(obs_dim)
     norm.load_state_dict(ckpt["norm"])

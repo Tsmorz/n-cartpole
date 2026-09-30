@@ -31,7 +31,7 @@ Two learners share the environment: **PPO** (`scripts/train.py`, `training/train
 
 **Checkpoint naming and layout**: checkpoints live under `checkpoints/<single|double>/<ppo|tqc>/`, chosen automatically from `--links` (override with `--checkpoint-dir`). The folder tells you the link count and algorithm; filenames are algo-prefixed on top of that — `ppo_latest.pt`, `ppo_iter_NNNNN.pt`, `tqc_latest.pt`, `tqc_NNNNNNN.pt` — so a bare filename never has to be interpreted against its parent directory to know what it is. Every checkpoint embeds its full `TrainingConfig`/`TQCConfig` (including `env.n_links`) plus an `"algo"` key, so `policy/loader.py::load_policy()` and therefore `scripts/play.py` / `scripts/policy_map.py` reconstruct the right network shape (`n_cartpole/env/factory.py::env_spec()`) from the checkpoint alone — replay and the policy map work for any checkpoint regardless of which folder it's opened from. `policy/tqc.py`'s `SquashedGaussianActor`/`QuantileCritic` take an `obs_dim` override for this (default 8, for backward compatibility with pre-existing double-link checkpoints and `tests/test_tqc.py`).
 
-**Publishing checkpoints**: `checkpoints/` is gitignored — never commit `.pt` files. Pretrained models are distributed via GitHub Releases, built by `.github/workflows/release-models.yml`: a 2-job matrix pipeline (`train` × `{single, double}` → `release`) that trains fresh PPO + TQC checkpoints for both link counts on `ubuntu-latest`, zips each `checkpoints/<links>/<algo>/` folder (`single-ppo.zip`, `single-tqc.zip`, `double-ppo.zip`, `double-tqc.zip`, each including a demo `replay.html`), uploads them as build artifacts, then a second job downloads all four and publishes them to a GitHub Release via `softprops/action-gh-release`. Triggers: pushing a tag matching `models-v*`, or `workflow_dispatch` (inputs: `tag`, `iterations`, `tqc_steps`, `draft`) for a manual/dry-run release. `task download-models [-- <tag>]` fetches and unzips a release's checkpoints back into `checkpoints/` via `gh release download`. If you touch `scripts/train.py`/`scripts/train_tqc.py`'s CLI flags or the checkpoint directory convention, update this workflow's `--links`/`--iterations`/`--steps` invocations to match.
+**Publishing checkpoints**: `checkpoints/` is gitignored — never commit `.pt` files, and nothing trains in CI (no GitHub Actions workflow does model training; `ci.yml` only runs lint/tests). Pretrained models are distributed via GitHub Releases, built entirely locally via Taskfile targets: `task package-models` zips whatever exists under `checkpoints/<single|double>/<ppo|tqc>/` into `dist/{single,double}-{ppo,tqc}.zip` (skipping combinations that haven't been trained — see the guard in `Taskfile.yml`), and `task release-models -- <tag>` runs that, then `git tag`/`git push`, then `gh release create <tag> dist/*.zip --generate-notes` (requires the `gh` CLI, authenticated). `task download-models [-- <tag>]` reverses it: `gh release download` + unzip back into `checkpoints/`. If you change the checkpoint directory convention (`scripts/train.py`/`scripts/train_tqc.py`'s `--checkpoint-dir` default), update `package-models`'s `for links in single double; for algo in ppo tqc` loop in `Taskfile.yml` to match.
 
 Run a single test:
 ```bash
@@ -43,11 +43,12 @@ uv run pytest tests/test_dynamics.py::test_energy_conservation -v
 ```
 n_cartpole/
   env/
-    dynamics.py         — mass_matrix(), rhs() with friction, step() — pure numpy + scipy (double-link)
-    single_dynamics.py  — single-link analogue of dynamics.py
-    double_cartpole.py  — gymnasium.Env; obs encoding, bounded reward, diverse reset, OBS_MIRROR_SIGN
-    single_cartpole.py  — single-link gymnasium.Env, same conventions, OBS_DIM=5
-    factory.py           — make_env()/env_spec(): pick single vs. double from EnvConfig.n_links
+    dynamics.py         — GENERAL n-link mass_matrix(theta), rhs(), step() with friction — pure numpy + scipy; PhysicsParams (per-link masses/lengths/joint_friction as scalar-or-sequence LinkSpec)
+    cartpole.py         — NPendulumCartpole gymnasium.Env + EnvConfig + obs_dim()/obs_mirror_sign()/encode_obs(); one env parameterized by n_links
+    double_cartpole.py  — thin back-compat shim: DoublePendulumCartpole(NPendulumCartpole), OBS_MIRROR_SIGN, re-exports EnvConfig
+    single_cartpole.py  — thin back-compat shim: SinglePendulumCartpole(NPendulumCartpole), OBS_MIRROR_SIGN
+    single_dynamics.py  — thin shim: re-exports dynamics.py + scalar-theta mass_matrix(theta1)
+    factory.py           — make_env()/env_spec()/links_name(): build the n-link env + spec from EnvConfig.n_links
   policy/
     actor_critic.py     — PPO Actor, Critic MLPs + RunningNorm observation normalizer
     ppo.py              — compute_gae(), ppo_update() (return-norm + target_kl) — stateless
@@ -70,15 +71,19 @@ scripts/
   plot_returns.py       — metrics.csv/returns.csv → interactive training dashboard (task plot)
   policy_map.py         — checkpoint → input→output control-surface map (task policy-map)
 tests/
-  test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD
-  test_env.py           — gym API contract, obs shape, bounded reward, termination
+  test_dynamics.py      — energy conservation (frictionless), friction dissipation, equilibria, mass matrix PD (2-link)
+  test_env.py           — gym API contract, obs shape, bounded reward, termination (double)
+  test_single.py        — single-link env/dynamics/factory
+  test_n_links.py       — n = 3, 4: energy conservation, PD mass matrix, gym contract, reward bounds; PhysicsParams broadcasting + legacy-checkpoint upgrade
   test_ppo.py           — GAE formula, PPO losses finite, advantage normalization
   test_training.py      — full PPO loop smoke test
 ```
 
-**State vs. observation**: The internal physics state is `[x, ẋ, θ₁, θ̇₁, θ₂, θ̇₂]` (6D, angles in radians, 0 = upright). The observation fed to the neural net is `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` (8D) to remove the angle discontinuity at ±π.
+**n links**: The env, dynamics, obs encoding, mirror-symmetry, and reward are all generalized to an arbitrary number of pendulum links, selected by `EnvConfig.n_links` (`--links 1|2|3|4|…` on both trainers; anything ≥1 works). `dynamics.py` builds the `(n+1)×(n+1)` mass matrix and `rhs` from closed forms (absolute angles, so the velocity coupling is purely centrifugal), verified term-by-term against the old hand-derived single/double models and symbolically for n up to 4. Checkpoints go under `checkpoints/<single|double|triple|quadruple|Nlink>/<ppo|tqc>/` via `factory.links_name()`. Per-link physics (`PhysicsParams.masses/lengths/joint_friction`) accept a scalar (shared across links) or a per-link sequence; a shorter sequence is extended by repeating its last value, so `--links 3` just works with the 2-link defaults.
 
-**Angle convention**: θ = 0 means upright; θ = π means hanging straight down. Starting condition for training is a small random perturbation from `[0, 0, π, 0, π, 0]` (both poles down). Reward `cos θ₁ + cos θ₂` peaks at 2.0 (both upright) and bottoms at -2.0 (both down).
+**State vs. observation**: The internal physics state is `[x, ẋ, θ₁, θ̇₁, …, θₙ, θ̇ₙ]` (`2 + 2n`-D, angles in radians, 0 = upright). The observation fed to the net is `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, …]` (`2 + 3n`-D) to remove the angle discontinuity at ±π. So the double link is 6D state / 8D obs, single is 4D/5D, triple is 8D/11D.
+
+**Angle convention**: θ = 0 means upright; θ = π means hanging straight down. Training starts from a small random perturbation of the all-down state (`θᵢ = π` for every link). The bounded reward's angle factor is a **product** over links of `0.5 + 0.5·cos θᵢ`, peaking at 1.0 only when every pole is upright.
 
 **PPO hyperparameters**: γ=0.99, λ=0.95, ε=0.2, LR=3e-4, 10 epochs/rollout, 2048 steps/worker, minibatch 512, grad clip 0.5, entropy coeff 0.01 → 0.001, hidden 256. Defaults live in `TrainingConfig` and are overridable from `scripts/train.py` (`--workers`, `--steps`, `--iterations`, `--lr`, `--hidden`, `--mini-batch`, `--device`).
 
@@ -98,7 +103,7 @@ The reward `cos θ₁ + cos θ₂ − 0.1|x| − 0.001F²` is **additive and unb
 
 **Angle wrapping**: The internal state angles are not wrapped — they can accumulate beyond ±π during long episodes with rapid spinning. This is intentional: the RK45 integrator handles it correctly and the cos/sin observation encoding is already periodic. Do not wrap angles in dynamics.py or you'll break energy conservation.
 
-**Mass matrix near singular configurations**: The mass matrix M(θ) is guaranteed positive definite for any θ (provable from the kinetic energy). However, numerical conditioning degrades when θ₁ ≈ θ₂ (both poles aligned). `np.linalg.solve` handles this fine for the default parameters; if you change params significantly, verify `np.linalg.cond(M)` stays below ~1e6.
+**Mass matrix near singular configurations**: The `(n+1)×(n+1)` mass matrix M(θ) is guaranteed positive definite for any θ (provable from the kinetic energy). However, numerical conditioning degrades when adjacent links align (θᵢ ≈ θⱼ), and worsens as n grows. `np.linalg.solve` handles this fine for the default parameters up to a few links; if you change params significantly or push n higher, verify `np.linalg.cond(M)` stays below ~1e6. If you edit `dynamics.py`, re-run the symbolic cross-check (see `tests/test_n_links.py` energy-conservation tests, which catch any term error via drift).
 
 **Multiprocessing on Mac**: `scripts/train.py` uses `if __name__ == "__main__":` guard — required for torch.multiprocessing spawn context on macOS. If you move the `Trainer.train()` call outside this guard, workers will spawn infinitely.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from n_cartpole.env.double_cartpole import EnvConfig
+from n_cartpole.env.cartpole import EnvConfig, NPendulumCartpole
 from n_cartpole.env.dynamics import PhysicsParams
 from n_cartpole.env.factory import env_spec, make_env
 from n_cartpole.env.single_cartpole import SinglePendulumCartpole
@@ -12,15 +12,17 @@ from n_cartpole.env.single_dynamics import mass_matrix, total_energy
 
 
 def test_factory_selects_by_links() -> None:
-    """make_env / env_spec must dispatch on n_links."""
+    """make_env / env_spec must build the env width from n_links."""
     single = make_env(EnvConfig(n_links=1))
     double = make_env(EnvConfig(n_links=2))
-    assert isinstance(single, SinglePendulumCartpole)
+    assert isinstance(single, NPendulumCartpole)
+    assert single.n_links == 1
+    assert double.n_links == 2
     assert single.observation_space.shape == (5,)
     assert double.observation_space.shape == (8,)
-    assert env_spec(1)[0] == 5
-    assert env_spec(2)[0] == 8
-    assert env_spec(1)[1].shape == (5,)
+    assert env_spec(EnvConfig(n_links=1))[0] == 5
+    assert env_spec(EnvConfig(n_links=2))[0] == 8
+    assert env_spec(EnvConfig(n_links=1))[1].shape == (5,)
 
 
 def test_single_env_contract() -> None:
@@ -56,7 +58,7 @@ def test_single_energy_conservation_frictionless() -> None:
     """With no friction and no force, mechanical energy is conserved."""
     from n_cartpole.env.single_dynamics import step
 
-    p = PhysicsParams(b=0.0, c1=0.0)
+    p = PhysicsParams(b=0.0, joint_friction=0.0)
     state = np.array([0.0, 0.0, np.pi / 3, 0.5])
     e0 = total_energy(state, p)
     for _ in range(200):
