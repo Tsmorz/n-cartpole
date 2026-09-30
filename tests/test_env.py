@@ -5,7 +5,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from n_cartpole.env.cartpole import NPendulumCartpole, obs_dim, obs_mirror_sign, sysid_dim
+from n_cartpole.env.cartpole import (
+    NPendulumCartpole,
+    obs_dim,
+    obs_mirror_sign,
+    sysid_dim,
+)
 from n_cartpole.env.double_cartpole import DoublePendulumCartpole, EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
 from n_cartpole.env.hardware_config import HardwareConfig
@@ -161,32 +166,36 @@ def test_action_clipping() -> None:
 
 
 def test_obs_dim() -> None:
+    """obs_dim returns 2 + 3*n_links for each link count."""
     assert obs_dim(1) == 5
     assert obs_dim(2) == 8
     assert obs_dim(3) == 11
 
 
 def test_sysid_dim() -> None:
+    """sysid_dim matches obs_dim (same layout: M, b, then m/l/c per link)."""
     assert sysid_dim(1) == 5
     assert sysid_dim(2) == 8
 
 
 def test_obs_mirror_sign_without_sysid() -> None:
+    """Mirror sign vector negates x, xd, sin θ, θd and keeps cos θ."""
     signs = obs_mirror_sign(2)
     assert signs.shape == (8,)
     assert signs[0] == -1  # x flips
-    assert signs[2] == 1   # cos θ stays
+    assert signs[2] == 1  # cos θ stays
 
 
 def test_obs_mirror_sign_with_sysid() -> None:
+    """Mirror sign vector appends +1 for all sysID parameters."""
     signs = obs_mirror_sign(2, with_sysid=True)
     expected_len = obs_dim(2) + sysid_dim(2)
     assert signs.shape == (expected_len,)
-    # sysid params are +1 (symmetric under mirroring)
-    assert np.all(signs[obs_dim(2):] == 1)
+    assert np.all(signs[obs_dim(2) :] == 1)
 
 
 def test_n_links_less_than_one_raises() -> None:
+    """NPendulumCartpole raises ValueError for n_links < 1."""
     with pytest.raises(ValueError, match="n_links"):
         NPendulumCartpole(EnvConfig(n_links=0))
 
@@ -197,6 +206,7 @@ def test_n_links_less_than_one_raises() -> None:
 
 
 def _hw_config(delay_steps: int = 1, sensor_noise: float = 0.0) -> HardwareConfig:
+    """Build a minimal HardwareConfig for testing."""
     return HardwareConfig(
         physics=PhysicsParams(),
         delay_steps=delay_steps,
@@ -205,6 +215,7 @@ def _hw_config(delay_steps: int = 1, sensor_noise: float = 0.0) -> HardwareConfi
 
 
 def test_hardware_env_obs_shape() -> None:
+    """With hardware config the obs includes the sysID context block."""
     cfg = EnvConfig(n_links=2, hardware=_hw_config())
     env = NPendulumCartpole(cfg)
     obs, _ = env.reset(seed=0)
@@ -213,35 +224,36 @@ def test_hardware_env_obs_shape() -> None:
 
 
 def test_hardware_env_reset_resamples_context() -> None:
+    """The sysID context block has the right shape after each reset."""
     cfg = EnvConfig(n_links=2, hardware=_hw_config())
     env = NPendulumCartpole(cfg)
     obs1, _ = env.reset(seed=0)
     obs2, _ = env.reset(seed=99)
-    # sysID context (last sysid_dim entries) differs between resets with diff seeds
-    ctx1 = obs1[obs_dim(2):]
-    ctx2 = obs2[obs_dim(2):]
+    ctx1 = obs1[obs_dim(2) :]
+    ctx2 = obs2[obs_dim(2) :]
     assert ctx1.shape == (sysid_dim(2),)
     assert ctx2.shape == (sysid_dim(2),)
 
 
 def test_hardware_env_action_delay() -> None:
+    """Action delay buffer steps without error over multiple control cycles."""
     cfg = EnvConfig(n_links=2, hardware=_hw_config(delay_steps=2))
     env = NPendulumCartpole(cfg)
     env.reset(seed=0)
-    # Should complete without error through the delay buffer
     for _ in range(5):
         env.step(np.array([1.0], dtype=np.float32))
 
 
 def test_hardware_env_sensor_noise() -> None:
+    """Sensor noise is applied but the observation remains finite."""
     cfg = EnvConfig(n_links=1, hardware=_hw_config(sensor_noise=0.1))
     env = NPendulumCartpole(cfg)
     obs, _ = env.reset(seed=0)
-    # With noise the obs must still be finite
     assert np.all(np.isfinite(obs))
 
 
 def test_hardware_env_no_delay_buffer() -> None:
+    """delay_steps=0 skips the delay buffer; obs shape still includes sysID."""
     cfg = EnvConfig(n_links=1, hardware=_hw_config(delay_steps=0))
     env = NPendulumCartpole(cfg)
     env.reset(seed=0)

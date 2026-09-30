@@ -8,20 +8,21 @@ import numpy as np
 import pytest
 import torch
 
-from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
 from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
-from n_cartpole.policy.loader import PolicyBundle, load_policy
+from n_cartpole.policy.loader import load_policy
 from n_cartpole.policy.tqc import QuantileCritic, SquashedGaussianActor
 from n_cartpole.training.off_policy import TQCConfig
 from n_cartpole.training.trainer import TrainingConfig
-
 
 _OBS_DIM = 8  # double-link default
 _HIDDEN = 16
 
 
-def _make_ppo_checkpoint(path: Path, *, with_critic: bool = True, with_cfg: bool = True) -> None:
+def _make_ppo_checkpoint(
+    path: Path, *, with_critic: bool = True, with_cfg: bool = True
+) -> None:
+    """Write a minimal PPO checkpoint to disk."""
     actor = Actor(obs_dim=_OBS_DIM, hidden=_HIDDEN)
     norm = RunningNorm(_OBS_DIM)
     ckpt: dict = {"actor": actor.state_dict(), "norm": norm.state_dict(), "algo": "ppo"}
@@ -35,8 +36,11 @@ def _make_ppo_checkpoint(path: Path, *, with_critic: bool = True, with_cfg: bool
 
 
 def _make_tqc_checkpoint(path: Path, *, with_critic: bool = True) -> None:
+    """Write a minimal TQC checkpoint to disk."""
     phys = PhysicsParams()
-    actor = SquashedGaussianActor(obs_dim=_OBS_DIM, hidden=_HIDDEN, force_max=phys.force_max)
+    actor = SquashedGaussianActor(
+        obs_dim=_OBS_DIM, hidden=_HIDDEN, force_max=phys.force_max
+    )
     norm = RunningNorm(_OBS_DIM)
     cfg = TQCConfig(hidden=_HIDDEN)
     ckpt: dict = {
@@ -57,6 +61,7 @@ def _make_tqc_checkpoint(path: Path, *, with_critic: bool = True) -> None:
 
 
 def test_load_policy_missing_file(tmp_path: Path) -> None:
+    """load_policy raises FileNotFoundError for a non-existent path."""
     with pytest.raises(FileNotFoundError):
         load_policy(tmp_path / "nonexistent.pt")
 
@@ -67,6 +72,7 @@ def test_load_policy_missing_file(tmp_path: Path) -> None:
 
 
 def test_load_ppo_policy_with_critic(tmp_path: Path) -> None:
+    """PPO checkpoint with critic populates bundle.value."""
     path = tmp_path / "ppo.pt"
     _make_ppo_checkpoint(path, with_critic=True)
     bundle = load_policy(path)
@@ -77,6 +83,7 @@ def test_load_ppo_policy_with_critic(tmp_path: Path) -> None:
 
 
 def test_load_ppo_policy_without_critic(tmp_path: Path) -> None:
+    """PPO checkpoint without critic leaves bundle.value as None."""
     path = tmp_path / "ppo_no_critic.pt"
     _make_ppo_checkpoint(path, with_critic=False)
     bundle = load_policy(path)
@@ -85,11 +92,14 @@ def test_load_ppo_policy_without_critic(tmp_path: Path) -> None:
 
 
 def test_load_ppo_policy_no_cfg(tmp_path: Path) -> None:
+    """PPO checkpoint without cfg falls back to hidden=128 defaults."""
     # When no cfg is embedded, loader falls back to hidden=128; match that here.
     path = tmp_path / "ppo_no_cfg.pt"
     actor = Actor(obs_dim=_OBS_DIM, hidden=128)
     norm = RunningNorm(_OBS_DIM)
-    torch.save({"actor": actor.state_dict(), "norm": norm.state_dict(), "algo": "ppo"}, path)
+    torch.save(
+        {"actor": actor.state_dict(), "norm": norm.state_dict(), "algo": "ppo"}, path
+    )
     bundle = load_policy(path)
     assert bundle.n_links == 2
     assert bundle.obs_dim == _OBS_DIM
@@ -101,6 +111,7 @@ def test_load_ppo_policy_no_cfg(tmp_path: Path) -> None:
 
 
 def test_load_tqc_policy_with_critic(tmp_path: Path) -> None:
+    """TQC checkpoint with critic populates bundle.value."""
     path = tmp_path / "tqc.pt"
     _make_tqc_checkpoint(path, with_critic=True)
     bundle = load_policy(path)
@@ -109,6 +120,7 @@ def test_load_tqc_policy_with_critic(tmp_path: Path) -> None:
 
 
 def test_load_tqc_policy_without_critic(tmp_path: Path) -> None:
+    """TQC checkpoint without critic leaves bundle.value as None."""
     path = tmp_path / "tqc_no_critic.pt"
     _make_tqc_checkpoint(path, with_critic=False)
     bundle = load_policy(path)
@@ -122,6 +134,7 @@ def test_load_tqc_policy_without_critic(tmp_path: Path) -> None:
 
 
 def test_policy_bundle_encode(tmp_path: Path) -> None:
+    """encode() converts raw 2+2n states to 2+3n cos/sin observations."""
     path = tmp_path / "ppo.pt"
     _make_ppo_checkpoint(path)
     bundle = load_policy(path)
@@ -131,11 +144,12 @@ def test_policy_bundle_encode(tmp_path: Path) -> None:
     states[:, 4] = np.pi  # th2 = pi
     enc = bundle.encode(states)
     assert enc.shape == (4, _OBS_DIM)
-    # cos(pi) = -1, sin(pi) ~ 0
+    # cos(pi) = -1
     assert enc[0, 2] == pytest.approx(-1.0, abs=1e-5)
 
 
 def test_policy_bundle_normalize(tmp_path: Path) -> None:
+    """normalize() applies the running normalizer and returns a tensor."""
     path = tmp_path / "ppo.pt"
     _make_ppo_checkpoint(path)
     bundle = load_policy(path)
@@ -151,6 +165,7 @@ def test_policy_bundle_normalize(tmp_path: Path) -> None:
 
 
 def test_ppo_select_action(tmp_path: Path) -> None:
+    """PPO select_action returns an (B, 1) numpy array."""
     path = tmp_path / "ppo.pt"
     _make_ppo_checkpoint(path)
     bundle = load_policy(path)
@@ -160,6 +175,7 @@ def test_ppo_select_action(tmp_path: Path) -> None:
 
 
 def test_ppo_value(tmp_path: Path) -> None:
+    """PPO value function returns a (B,) numpy array."""
     path = tmp_path / "ppo.pt"
     _make_ppo_checkpoint(path, with_critic=True)
     bundle = load_policy(path)
@@ -169,6 +185,7 @@ def test_ppo_value(tmp_path: Path) -> None:
 
 
 def test_tqc_select_action(tmp_path: Path) -> None:
+    """TQC select_action returns an (B, 1) numpy array."""
     path = tmp_path / "tqc.pt"
     _make_tqc_checkpoint(path)
     bundle = load_policy(path)
@@ -178,6 +195,7 @@ def test_tqc_select_action(tmp_path: Path) -> None:
 
 
 def test_tqc_value(tmp_path: Path) -> None:
+    """TQC value function returns a (B,) numpy array."""
     path = tmp_path / "tqc.pt"
     _make_tqc_checkpoint(path, with_critic=True)
     bundle = load_policy(path)

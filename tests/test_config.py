@@ -9,7 +9,6 @@ import pytest
 
 from n_cartpole.env.hardware_config import HardwareConfig
 
-
 _DEFAULT_TOML = Path(__file__).parent.parent / "config" / "default.toml"
 
 
@@ -19,6 +18,7 @@ _DEFAULT_TOML = Path(__file__).parent.parent / "config" / "default.toml"
 
 
 def test_hardware_config_defaults() -> None:
+    """HardwareConfig default field values match documented constants."""
     hw = HardwareConfig()
     assert hw.M_noise == pytest.approx(0.05)
     assert hw.delay_steps == 1
@@ -26,6 +26,7 @@ def test_hardware_config_defaults() -> None:
 
 
 def test_hardware_config_from_toml(tmp_path: Path) -> None:
+    """from_toml reads physics, noise, and pipeline sections correctly."""
     toml_text = textwrap.dedent("""
         [hardware.physics]
         M = 1.5
@@ -46,6 +47,7 @@ def test_hardware_config_from_toml(tmp_path: Path) -> None:
 
 
 def test_hardware_config_from_toml_missing_section(tmp_path: Path) -> None:
+    """from_toml raises KeyError when no [hardware] section is present."""
     p = tmp_path / "no_hw.toml"
     p.write_text("[env]\nn_links = 2\n")
     with pytest.raises(KeyError, match="hardware"):
@@ -53,6 +55,7 @@ def test_hardware_config_from_toml_missing_section(tmp_path: Path) -> None:
 
 
 def test_hardware_config_from_toml_defaults(tmp_path: Path) -> None:
+    """from_toml falls back to HardwareConfig defaults for missing keys."""
     toml_text = "[hardware]\n"
     p = tmp_path / "hw_empty.toml"
     p.write_text(toml_text)
@@ -67,6 +70,7 @@ def test_hardware_config_from_toml_defaults(tmp_path: Path) -> None:
 
 
 def test_load_ppo_config_default_toml() -> None:
+    """load_ppo_config reads the shipped default.toml without error."""
     from n_cartpole.config import load_ppo_config
 
     cfg = load_ppo_config(_DEFAULT_TOML)
@@ -76,6 +80,7 @@ def test_load_ppo_config_default_toml() -> None:
 
 
 def test_load_tqc_config_default_toml() -> None:
+    """load_tqc_config reads the shipped default.toml without error."""
     from n_cartpole.config import load_tqc_config
 
     cfg = load_tqc_config(_DEFAULT_TOML)
@@ -85,6 +90,7 @@ def test_load_tqc_config_default_toml() -> None:
 
 
 def test_load_ppo_config_with_hardware(tmp_path: Path) -> None:
+    """load_ppo_config builds HardwareConfig when [hardware] section is present."""
     from n_cartpole.config import load_ppo_config
 
     toml_text = textwrap.dedent("""
@@ -108,6 +114,7 @@ def test_load_ppo_config_with_hardware(tmp_path: Path) -> None:
 
 
 def test_load_tqc_config_with_hardware(tmp_path: Path) -> None:
+    """load_tqc_config builds HardwareConfig when [hardware] section is present."""
     from n_cartpole.config import load_tqc_config
 
     toml_text = textwrap.dedent("""
@@ -129,6 +136,7 @@ def test_load_tqc_config_with_hardware(tmp_path: Path) -> None:
 
 
 def test_load_ppo_config_zero_workers(tmp_path: Path) -> None:
+    """n_workers=0 in TOML triggers auto-detection and resolves to >= 1."""
     from n_cartpole.config import load_ppo_config
 
     toml_text = textwrap.dedent("""
