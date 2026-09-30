@@ -1,6 +1,7 @@
 # n-cartpole
 
 [![CI](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml/badge.svg)](https://github.com/Tsmorz/n-cartpole/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/Tsmorz/n-cartpole/badge.svg?branch=main)](https://coveralls.io/github/Tsmorz/n-cartpole?branch=main)
 [![Python](https://img.shields.io/badge/python-3.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 

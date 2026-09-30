@@ -70,7 +70,7 @@ tasks:
   test:
     desc: Run the test suite with coverage
     cmds:
-      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --no-cov-on-fail --cov-fail-under=90
+      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --cov-report=lcov:coverage.lcov --no-cov-on-fail --cov-fail-under=90
 
   format:
     desc: Format, lint, and type-check the code

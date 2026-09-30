@@ -71,3 +71,9 @@ jobs:
 
       - name: Run tests
         run: task test
+
+      - name: Upload coverage to Coveralls
+        if: matrix.python-version == '3.13'
+        uses: coverallsapp/github-action@v2
+        with:
+          file: coverage.lcov
