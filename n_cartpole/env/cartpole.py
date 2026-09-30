@@ -54,6 +54,11 @@ class EnvConfig:
     init_random_prob: float = 0.3
     init_vel_noise: float = 2.0  # rad/s (and m/s for the cart) for random resets
 
+    # Actuator slew limit (N/s): the applied force can change by at most
+    # ``force_slew * dt`` per step, like a real motor/drive. None = unlimited.
+    # The default lets a full-scale reversal (2*force_max) take ~50 ms.
+    force_slew: float | None = 800.0
+
     # Optional hardware configuration.  When set, the env appends a sysID
     # context vector to every observation and models action latency / sensor
     # noise.  Leave as None for pure simulation training without sysID.
@@ -139,11 +144,12 @@ class NPendulumCartpole(gym.Env):
 
     Reward:
         Bounded, multiplicative shaping in (0, 1] (Lee et al.; see docs/):
-            ``r = r_angle * r_pos * r_vel * r_act``
+            ``r = r_angle * r_pos * r_vel * r_act * r_rate``
         Each factor lies in [~0.5, 1] or [0, 1]; the product peaks at 1.0 only
         when every pole is upright, the cart is centered, velocities are low, and
-        little force is used. The angle factor is a PRODUCT over all links, so
-        partial credit for some-but-not-all links upright is suppressed; the
+        little force is used and the command changes smoothly (``r_rate``; the
+        applied force is also slew-limited, see ``EnvConfig.force_slew``). The
+        angle factor is a PRODUCT over all links, so partial credit for some-but-not-all links upright is suppressed; the
         velocity factor rewards actually balancing rather than spinning through
         upright. Nearly always positive and tightly bounded → well-scaled returns
         without value normalization.
@@ -169,6 +175,8 @@ class NPendulumCartpole(gym.Env):
     # Weight on the shaping term relative to the base [0,1]-bounded reward; small
     # enough that the base multiplicative reward still dominates return scale.
     SHAPING_WEIGHT: ClassVar[float] = 0.2
+    # Max fractional reward lost to command chatter (see ``r_rate``).
+    RATE_PENALTY: ClassVar[float] = 0.2
 
     def __init__(self, config: EnvConfig | None = None) -> None:
         """Initialize the environment."""
@@ -202,6 +210,8 @@ class NPendulumCartpole(gym.Env):
         self._state = np.zeros(self.state_dim)
         self._step_count = 0
         self._sysid_context: np.ndarray | None = None
+        self._prev_cmd = 0.0  # last commanded force (for the rate penalty)
+        self._prev_applied = 0.0  # last force applied to the plant (slew limit)
 
         # Action delay buffer: holds the last ``delay_steps`` commands; the oldest
         # is applied to the plant each step.  None when no delay is configured.
@@ -244,6 +254,8 @@ class NPendulumCartpole(gym.Env):
                 -cfg.init_noise, cfg.init_noise, self.state_dim
             )
         self._step_count = 0
+        self._prev_cmd = 0.0
+        self._prev_applied = 0.0
         self._prev_potential = self._angle_potential(self._state)
 
         hw = self.cfg.hardware
@@ -277,11 +289,23 @@ class NPendulumCartpole(gym.Env):
         else:
             applied_F = raw_F
 
+        # Actuator slew limit: the plant can't follow an arbitrarily fast command.
+        slew = self.cfg.force_slew
+        if slew is not None:
+            dF = slew * p.dt
+            applied_F = self._prev_applied + float(
+                np.clip(applied_F - self._prev_applied, -dF, dF)
+            )
+        self._prev_applied = applied_F
+
         self._state = step(self._state, applied_F, p)
         self._step_count += 1
 
         obs = self._make_obs()
-        reward = self._compute_reward(self._state, applied_F)
+        # The rate penalty acts on the *commanded* change so the policy gets a
+        # gradient even where the slew limit would hide the jump from the plant.
+        reward = self._compute_reward(self._state, applied_F, raw_F - self._prev_cmd)
+        self._prev_cmd = raw_F
 
         terminated = bool(abs(self._state[0]) > p.x_lim)
         truncated = self._step_count >= self.cfg.max_steps
@@ -308,7 +332,9 @@ class NPendulumCartpole(gym.Env):
         theta = np.asarray(state)[2::2]
         return float(np.prod(0.5 + 0.5 * np.cos(theta)))
 
-    def _compute_reward(self, state: np.ndarray, F: float) -> float:
+    def _compute_reward(
+        self, state: np.ndarray, F: float, dF_cmd: float = 0.0
+    ) -> float:
         """Bounded multiplicative reward in (0, 1], plus potential-based shaping.
 
         Mirror-invariant by construction (every factor depends on x², cos θ, θ̇²,
@@ -337,7 +363,12 @@ class NPendulumCartpole(gym.Env):
         a = F / p.force_max
         r_act = 0.8 + 0.2 * max(1.0 - a**2, 0.0)
 
-        base = r_angle * r_pos * r_vel * r_act
+        # Command-rate term: penalize changing the commanded force between steps
+        # (normalized; a full reversal saturates it). Bounded to [0.8, 1], even.
+        da = dF_cmd / p.force_max
+        r_rate = 1.0 - self.RATE_PENALTY * min(da * da, 1.0)
+
+        base = r_angle * r_pos * r_vel * r_act * r_rate
 
         # Potential-based shaping (Ng et al. 1999): F(s,s') = g*P(s') - P(s), with
         # Φ = r_angle. Rewards progress toward upright every step instead of only

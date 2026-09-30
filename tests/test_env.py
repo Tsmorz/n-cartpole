@@ -259,3 +259,32 @@ def test_hardware_env_no_delay_buffer() -> None:
     env.reset(seed=0)
     obs, reward, *_ = env.step(np.array([0.0], dtype=np.float32))
     assert obs.shape[0] == obs_dim(1) + sysid_dim(1)
+
+
+def test_force_slew_limits_applied_force_change() -> None:
+    """With a slew limit, a full-scale command is reached gradually."""
+    from n_cartpole.env.cartpole import EnvConfig, NPendulumCartpole
+
+    cfg = EnvConfig(n_links=1, force_slew=400.0, init_random_prob=0.0)
+    env = NPendulumCartpole(cfg)
+    env.reset(seed=0)
+    fmax = cfg.physics.force_max
+    env.step(np.array([fmax], dtype=np.float32))
+    assert env._prev_applied == pytest.approx(400.0 * cfg.physics.dt)
+    for _ in range(10):
+        env.step(np.array([fmax], dtype=np.float32))
+    assert env._prev_applied == pytest.approx(fmax)
+
+
+def test_rate_penalty_reduces_reward_for_chatter() -> None:
+    """A large command change costs reward versus a steady command."""
+    from n_cartpole.env.cartpole import EnvConfig, NPendulumCartpole
+
+    env = NPendulumCartpole(EnvConfig(n_links=1, init_random_prob=0.0))
+    env.reset(seed=0)
+    state = env.get_state()
+    fmax = env.cfg.physics.force_max
+    steady = env._compute_reward(state, fmax, 0.0)
+    env._prev_potential = env._angle_potential(state)
+    chatter = env._compute_reward(state, fmax, 2 * fmax)
+    assert chatter < steady
