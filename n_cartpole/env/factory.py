@@ -12,6 +12,7 @@ import numpy as np
 from n_cartpole.env.cartpole import (
     EnvConfig,
     NPendulumCartpole,
+    goal_dim,
     obs_dim,
     obs_mirror_sign,
     sysid_dim,
@@ -29,13 +30,25 @@ def make_env(config: EnvConfig) -> NPendulumCartpole:
 def env_spec(config: EnvConfig) -> tuple[int, np.ndarray]:
     """Return ``(obs_dim, mirror_sign)`` for the given config.
 
-    Includes the sysID context dimensions when ``config.hardware`` is set.
+    Includes the goal dimensions when ``config.goal_conditioned`` and the sysID
+    context dimensions when ``config.hardware`` is set.
     """
     n = config.n_links
     with_sysid = config.hardware is not None
-    dim = obs_dim(n) + (sysid_dim(n) if with_sysid else 0)
-    sign = obs_mirror_sign(n, with_sysid=with_sysid)
+    # getattr: configs pickled in checkpoints before goal conditioning existed.
+    with_goal = bool(getattr(config, "goal_conditioned", False))
+    dim = (
+        obs_dim(n)
+        + (goal_dim(n) if with_goal else 0)
+        + (sysid_dim(n) if with_sysid else 0)
+    )
+    sign = obs_mirror_sign(n, with_sysid=with_sysid, with_goal=with_goal)
     return dim, sign
+
+
+def checkpoint_subdir(algo: str, goal_conditioned: bool) -> str:
+    """Algorithm folder under ``checkpoints/<links>/``: ``tqc`` or ``tqc-goal``."""
+    return f"{algo}-goal" if goal_conditioned else algo
 
 
 def links_name(n_links: int) -> str:

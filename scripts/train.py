@@ -1,22 +1,24 @@
-"""CLI entry point for training the double cartpole PPO policy."""
+"""CLI entry point for off-policy TQC training of the cartpole policy."""
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from pathlib import Path
 
+import torch
 from loguru import logger
 
 from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
-from n_cartpole.env.factory import links_name
-from n_cartpole.training.trainer import Trainer, TrainingConfig
+from n_cartpole.env.factory import checkpoint_subdir, links_name
+from n_cartpole.training.off_policy import TQCConfig, TQCTrainer
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train a PPO policy for double pendulum cartpole swing-up."
+        description="Train a TQC (off-policy) policy for double cartpole swing-up."
     )
     parser.add_argument(
         "--links",
@@ -25,82 +27,102 @@ def parse_args() -> argparse.Namespace:
         help="Number of pendulum links (>=1): 1 (single, warm-up), 2 (double), "
         "3 (triple), 4 (quadruple), ...",
     )
-    parser.add_argument(
-        "--workers", type=int, default=None, help="Number of rollout workers"
-    )
-    parser.add_argument(
-        "--steps", type=int, default=2048, help="Steps per worker per iteration"
-    )
-    parser.add_argument(
-        "--iterations", type=int, default=300, help="Number of PPO iterations"
-    )
+    parser.add_argument("--steps", type=int, default=200_000, help="Total env steps")
+    parser.add_argument("--hidden", type=int, default=256, help="MLP hidden size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Adam learning rate")
-    parser.add_argument("--hidden", type=int, default=256, help="MLP hidden layer size")
+    parser.add_argument("--batch", type=int, default=256, help="Minibatch size")
+    parser.add_argument("--n-critics", type=int, default=2, help="Number of critics")
+    parser.add_argument("--n-quantiles", type=int, default=25, help="Atoms per critic")
     parser.add_argument(
-        "--mini-batch",
-        type=int,
-        default=None,
-        help="PPO minibatch size (default: 512)",
+        "--drop", type=int, default=2, help="Top atoms to drop from the pooled set"
+    )
+    parser.add_argument(
+        "--no-symmetry", action="store_true", help="Disable symmetric augmentation"
     )
     parser.add_argument(
         "--device",
         type=str,
         default="auto",
         choices=["auto", "cpu", "mps", "cuda"],
-        help="Gradient-update device. 'auto' picks CPU, which is fastest for this "
-        "small network; use 'mps'/'cuda' only if you scale the network up.",
+        help="Gradient-update device ('auto' picks CPU for this small network)",
+    )
+    parser.add_argument(
+        "--goals",
+        action="store_true",
+        help="Goal-conditioned training: learn transitions between every "
+        "up/down configuration (UU, DU, UD, DD for 2 links) with one network. "
+        "Checkpoints go to checkpoints/<links>/tqc-goal/.",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Episode length in steps (default: 1000, or 3000 with --goals so "
+        "each episode covers several transitions)",
     )
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=None,
-        help="Checkpoint directory (default: checkpoints/<single|double|triple|…>/ppo, "
+        help="Checkpoint directory (default: checkpoints/<single|double|triple|…>/tqc, "
         "chosen from --links)",
     )
     parser.add_argument(
-        "--resume", type=Path, default=None, help="Resume from checkpoint path"
-    )
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
+        "--resume",
+        type=Path,
         default=None,
-        help="Save a checkpoint every N iterations (default: 50)",
+        help="Resume from a TQC checkpoint (architecture/env come from the "
+        "checkpoint; --steps is the new ABSOLUTE total). Pass tqc_latest.pt to "
+        "also restore the replay buffer.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    """Build TrainingConfig, instantiate Trainer, and run."""
+    """Build TQCConfig, instantiate TQCTrainer, and run."""
     args = parse_args()
     if args.links < 1:
         raise SystemExit(f"--links must be >= 1, got {args.links}")
 
-    checkpoint_dir = (
-        args.checkpoint_dir or Path("checkpoints") / links_name(args.links) / "ppo"
-    )
+    checkpoint_dir = args.checkpoint_dir or Path("checkpoints") / links_name(
+        args.links
+    ) / checkpoint_subdir("tqc", args.goals)
 
-    cfg = TrainingConfig(
-        env=EnvConfig(physics=PhysicsParams(), n_links=args.links),
+    cfg = TQCConfig(
+        env=EnvConfig(
+            physics=PhysicsParams(),
+            n_links=args.links,
+            goal_conditioned=args.goals,
+            max_steps=args.max_steps or (3000 if args.goals else 1000),
+        ),
         device=args.device,
-        steps_per_worker=args.steps,
         hidden=args.hidden,
         lr=args.lr,
-        n_iterations=args.iterations,
+        batch_size=args.batch,
+        n_critics=args.n_critics,
+        n_quantiles=args.n_quantiles,
+        top_quantiles_to_drop=args.drop,
+        symmetry_augment=not args.no_symmetry,
+        total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )
-    if args.workers is not None:
-        cfg.n_workers = args.workers
-    if args.mini_batch is not None:
-        cfg.mini_batch_size = args.mini_batch
-    if args.checkpoint_every is not None:
-        cfg.checkpoint_every = args.checkpoint_every
-
-    trainer = Trainer(cfg)
-
+    if args.resume is not None:
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if ckpt.get("algo") != "tqc":
+            raise SystemExit(f"{args.resume} is not a TQC checkpoint")
+        cfg = dataclasses.replace(
+            ckpt["cfg"],
+            device=args.device,
+            total_steps=args.steps,
+            checkpoint_dir=args.checkpoint_dir or args.resume.parent,
+        )
+    trainer = TQCTrainer(cfg)
     if args.resume is not None:
         trainer.load(args.resume)
-        logger.info(f"Resuming from {args.resume}")
-
+    logger.info(
+        f"TQC: {cfg.n_critics} critics x {cfg.n_quantiles} atoms, "
+        f"drop {cfg.top_quantiles_to_drop}, symmetry={cfg.symmetry_augment}"
+    )
     trainer.train()
 
 

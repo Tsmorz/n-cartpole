@@ -1,7 +1,6 @@
 """CLI: render the training dashboard (interactive HTML) from a metrics CSV.
 
-Prefers the rich ``metrics.csv`` (return + PPO diagnostics) and falls back to the
-legacy ``returns.csv``. Both are written by the trainer into the checkpoint dir.
+Prefers the rich ``metrics.csv`` and falls back to the legacy ``returns.csv``.
 """
 
 from __future__ import annotations
@@ -30,12 +29,12 @@ def _default_csv() -> Path:
     )
     if candidates:
         return candidates[0]
-    return Path("checkpoints") / "double" / "ppo" / "metrics.csv"
+    return Path("checkpoints") / "double" / "tqc" / "metrics.csv"
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Plot the PPO training dashboard.")
+    parser = argparse.ArgumentParser(description="Plot the training dashboard.")
     parser.add_argument(
         "--csv", type=Path, default=None, help="Metrics CSV (default: auto-detect)"
     )
@@ -45,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("checkpoints/training.html"),
         help="Output HTML path",
     )
-    parser.add_argument("--title", type=str, default="PPO training", help="Title")
+    parser.add_argument("--title", type=str, default="Training", help="Title")
     parser.add_argument(
         "--no-open", action="store_true", help="Do not open the HTML in a browser"
     )

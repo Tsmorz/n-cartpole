@@ -4,8 +4,8 @@ Ha et al., "SimBa: Simplicity Bias for Scaling Up Parameters in Deep
 Reinforcement Learning" (arXiv:2410.09754). A pre-LayerNorm residual MLP that
 lets actor/critic networks scale up in width/depth without the optimization
 instability plain MLPs show at larger sizes. Drop-in replacement for a plain
-``Linear -> activation -> Linear`` stack; used by both PPO (actor_critic.py)
-and TQC (tqc.py).
+``Linear -> activation -> Linear`` stack; used by the TQC actor and critics
+(tqc.py).
 """
 
 from __future__ import annotations

@@ -5,13 +5,11 @@
 # across Python files.
 #
 # Load in Python:
-#   from n_cartpole.config import load_ppo_config, load_tqc_config
-#   ppo_cfg = load_ppo_config("config/default.toml")
+#   from n_cartpole.config import load_tqc_config
 #   tqc_cfg = load_tqc_config("config/default.toml")
 #
 # Pass to the CLI:
-#   task train   -- --config config/default.toml
-#   task train-tqc -- --config config/default.toml
+#   task train -- --config config/default.toml
 
 
 # =============================================================================
@@ -41,6 +39,14 @@ max_steps        = 1000    # episode length limit (steps)
 init_noise       = 0.05    # perturbation around hanging-down start (rad / m)
 init_random_prob = 0.30    # fraction of resets that use a fully random state
 init_vel_noise   = 2.0     # velocity range for random resets (rad/s, m/s)
+
+# Goal-conditioned transitions between equilibria (UU, DU, UD, DD for 2 links).
+# When true the target configuration is part of the observation, episodes start
+# at any equilibrium, and the goal is re-drawn every goal_hold_steps steps.
+# Raise max_steps (e.g. 3000) so each episode covers several transitions.
+goal_conditioned = false
+goal_hold_steps  = [400, 800]  # steps each goal is held before a new one (4–8 s)
+goal_curriculum  = true        # oversample transitions that still fail
 
 
 # =============================================================================
@@ -78,36 +84,6 @@ joint_friction_noise = 0.0005   # per-link joint friction (N·m·s/rad)
 [hardware.pipeline]
 delay_steps      = 1      # steps between command and actuation (1 step = 10 ms)
 sensor_noise_std = 0.0    # Gaussian std added to each obs dim (set > 0 for noisy sensors)
-
-
-# =============================================================================
-# PPO training
-# =============================================================================
-[ppo]
-device           = "auto"  # "auto" → CPU (fastest for this tiny net)
-n_workers        = 0       # 0 = auto (cpu_count - 2, capped at 8)
-steps_per_worker = 2048
-hidden           = 256
-blocks           = 2       # SimBa residual blocks per network
-
-gamma              = 0.99
-lam                = 0.95
-clip_eps           = 0.20
-value_clip_eps     = 0.20
-entropy_coeff_start = 0.0
-entropy_coeff_end   = 0.0
-log_std_init        = 1.6   # initial policy std in force units; log(5)≈1.6 → ~5 N
-n_epochs            = 10
-lr                  = 3e-4
-max_grad_norm       = 0.5
-mini_batch_size     = 512
-normalize_returns   = true
-symmetry_augment    = true
-target_kl           = 0.03
-
-n_iterations     = 300
-checkpoint_every = 50
-log_every        = 10
 
 
 # =============================================================================

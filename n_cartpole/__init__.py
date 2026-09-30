@@ -1,1 +1,1 @@
-"""Double pendulum cartpole swing-up via PPO."""
+"""Double pendulum cartpole swing-up via TQC."""

@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-PPO and TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
+TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
 
 <img src="docs/assets/tqc_swingup.gif" alt="TQC policy swinging up and balancing both poles" width="900" height="522">
 
@@ -21,48 +21,39 @@ task init
 ## Quickstart
 
 ```bash
-# PPO (on-policy): parallel CPU workers, CPU gradient update — defaults to 2 links (double)
+# TQC (off-policy, distributional) — defaults to 2 links (double)
 task train
 
-# single-link warm-up run, or explicit double-link
+# single-link warm-up run, or a longer double-link run
 task train -- --links 1
-task train -- --links 2
+task train -- --links 2 --steps 300000
 
-# TQC (off-policy, distributional): sample-efficient, hardware-oriented
-task train-tqc -- --links 2 --steps 300000
-
-# override any hyperparameter, e.g. more workers / longer rollouts
-task train -- --workers 8 --steps 2048 --iterations 300
-
-# watch a trained policy — interactive HTML replay (auto-detects PPO/TQC and link count)
-task play -- --checkpoint checkpoints/double/ppo/ppo_latest.pt
+# watch a trained policy — interactive HTML replay (auto-detects link count)
 task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt
-task play -- --checkpoint checkpoints/single/ppo/ppo_latest.pt
+task play -- --checkpoint checkpoints/single/tqc/tqc_latest.pt
 
-# interactive training dashboard (return + PPO diagnostics) from metrics.csv
-# (auto-detects the most recently trained run; or point at one explicitly)
-task plot -- --csv checkpoints/double/ppo/metrics.csv
+# interactive training dashboard from a metrics.csv
+task plot -- --csv checkpoints/double/tqc/metrics.csv
 
 # the policy's input→output map: force (and value) over two state dims + slider
-task policy-map -- --checkpoint checkpoints/double/ppo/ppo_latest.pt --x theta1 --y theta1dot --slider theta2
+task policy-map -- --checkpoint checkpoints/double/tqc/tqc_latest.pt --x theta1 --y theta1dot --slider theta2
 ```
 
-**Checkpoint layout.** Checkpoints are organized `checkpoints/<single|double>/<ppo|tqc>/`,
-so the folder alone tells you the link count and the folder + filename prefix tell you
-the algorithm — e.g. `checkpoints/double/tqc/tqc_latest.pt`. Within each folder:
-`{ppo,tqc}_latest.pt` (rolling best/most-recent), `ppo_iter_NNNNN.pt` /
-`tqc_NNNNNNN.pt` (periodic snapshots by iteration/step), and PPO also writes
-`returns.csv` / `metrics.csv` there for `task plot`. `task play` and
-`task policy-map` auto-detect algorithm and link count from the checkpoint
-itself (via the saved `TrainingConfig`/`TQCConfig`), so any checkpoint path
-works regardless of which folder it lives in.
+**Checkpoint layout.** Checkpoints are organized `checkpoints/<single|double>/<tqc|tqc-goal>/`,
+so the folder alone tells you the link count and whether the policy is
+goal-conditioned — e.g. `checkpoints/double/tqc/tqc_latest.pt`. Within each folder:
+`tqc_latest.pt` (rolling most-recent, plus its replay buffer) and
+`tqc_NNNNNNN.pt` (periodic snapshots by step). `task play` and
+`task policy-map` auto-detect link count from the checkpoint itself (via the
+saved `TQCConfig`), so any checkpoint path works regardless of which folder it
+lives in.
 
 **Pretrained models.** `checkpoints/` is gitignored (binary, environment-specific,
 trivially reproducible) — pretrained weights are published as
 [GitHub Releases](https://github.com/Tsmorz/n-cartpole/releases) instead, each
-release carrying up to four zips (`single-ppo.zip`, `single-tqc.zip`,
-`double-ppo.zip`, `double-tqc.zip`), one per link-count/algorithm combination
-you've trained locally. Nothing trains in CI — releases are built and published
+release carrying up to four zips (`single-tqc.zip`, `double-tqc.zip`,
+`single-tqc-goal.zip`, `double-tqc-goal.zip`), one per combination you've
+trained locally. Nothing trains in CI — releases are built and published
 entirely from your machine. Fetch and unpack the latest release into
 `checkpoints/` with:
 
@@ -77,7 +68,7 @@ To cut a new release: train locally as usual, then run
 task release-models -- models-v1
 ```
 
-which zips whatever's under `checkpoints/<single|double>/<ppo|tqc>/`
+which zips whatever's under `checkpoints/<single|double>/<tqc|tqc-goal>/`
 (`task package-models` alone, if you just want the zips without
 tagging/publishing), tags and pushes `models-v1`, and creates the GitHub
 Release — only the combinations you actually trained are included.
@@ -100,27 +91,58 @@ readable control surface — a contour phase-portrait of the force the policy ap
 across a plane of states (blue = push right, red = push left), with a slider over a
 third dimension. `task plot` renders the training curves as small multiples.
 
-**Two learners.** PPO is the simple on-policy baseline. **TQC** (Truncated Quantile
-Critics) is the off-policy, distributional actor-critic that Lee et al. used for
-real multi-pendulum hardware — far more sample-efficient (demo above uses a TQC
-checkpoint: `task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt`).
-Both share the environment, the bounded reward, symmetric data augmentation,
-and the diverse initial-state distribution described below.
+**Learner.** **TQC** (Truncated Quantile Critics) is the off-policy,
+distributional actor-critic that Lee et al. used for real multi-pendulum
+hardware. It trains with the bounded reward, symmetric data augmentation, and
+the diverse initial-state distribution described below.
 
-> **Device note:** the networks are small (8→64→64 MLPs), so the whole run is
-> fastest on CPU — GPU per-op dispatch overhead outweighs the tiny matmuls, and
-> the GAE step is dramatically slower on MPS. `--device auto` therefore selects
-> CPU. Use `--device mps`/`--device cuda` only after substantially enlarging the
-> network.
+> **Device note:** the networks are small, so the whole run is fastest on CPU —
+> GPU per-op dispatch overhead outweighs the tiny matmuls. `--device auto`
+> therefore selects CPU. Use `--device mps`/`--device cuda` only after
+> substantially enlarging the network.
+
+## Transitions between configurations
+
+With `--goals`, one network learns to move between every up/down configuration
+and to switch between them on command, not just to swing up. Each configuration
+is labeled with one letter per link, base link first:
+
+| Label | Link 1 (base) | Link 2 (tip) | Passively stable? |
+|---|---|---|---|
+| `UU` | up | up | no — actively balanced |
+| `DU` | down | up | no — actively balanced |
+| `UD` | up | down | no — actively balanced |
+| `DD` | down | down | yes — policy damps the swing |
+
+That gives 12 transitions plus 4 "hold" cases, all learned by the same network.
+The target configuration is an extra input to the policy (±1 per link), and the
+reward measures closeness to that target instead of to upright.
+
+```bash
+# train (checkpoints go to checkpoints/double/tqc-goal/)
+task train -- --goals --steps 2000000
+
+# success rate of every start → goal transition
+task eval-transitions -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt
+
+# replay a commanded sequence: start hanging, then UU at 0 s, DU at 6 s, DD at 12 s
+task play -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --start DD --goals "UU@0,DU@6,DD@12"
+```
+
+During training, the goal changes every 4–8 s, episodes start at any
+configuration, and transitions that keep failing are practiced more often.
+Training logs a start × goal success table, and `task plot` adds a
+transition-success panel. On hardware, `env.set_goal("DU")` is the command
+input.
 
 ## Development
 
 | Command | Description |
 |---|---|
 | `task init` | Create virtual environment and install deps |
-| `task train` | Train the PPO policy (default settings, `--links {1,2}`) |
-| `task train-tqc` | Train the TQC policy (`--links {1,2}`) |
-| `task play` | Interactive HTML replay of a trained policy |
+| `task train` | Train the TQC policy (`--links {1,2}`, `--goals`) |
+| `task play` | Interactive HTML replay of a trained policy (`--goals` schedule for goal-conditioned checkpoints) |
+| `task eval-transitions` | Start × goal success table for a goal-conditioned checkpoint |
 | `task download-models` | Download a models release into `checkpoints/` |
 | `task package-models` | Zip local checkpoints into `dist/` |
 | `task release-models` | Package, tag, and publish local checkpoints as a GitHub Release |
@@ -135,7 +157,7 @@ and the diverse initial-state distribution described below.
 
 - **Dynamics**: Lagrangian EOM for cart + 2 pendulums (point-mass bobs) with viscous cart/joint friction; RK45 at **100 Hz**. Buildable bench-scale defaults: 1 kg cart, ~0.2/0.15 kg bobs, 0.25 m rods, ±0.5 m rail, ±20 N motor.
 - **Reward**: bounded, multiplicative shaping — `r_angle · r_pos · r_vel · r_act` (Lee et al. [2, 3]), nearly always in (0, 1]. Product over links forces *both* poles upright; the velocity term rewards balancing over spinning. On top of that, a potential-based shaping term (Ng et al. [1]) rewards progress toward upright every step, so swing-up is discovered sooner — see [Appendix: papers](#appendix-papers) below.
-- **Learners**: **PPO** (on-policy, GAE λ=0.95, ε=0.2, return-normalized value loss, KL early-stop) and **TQC** (off-policy, 2 quantile critics × 25 atoms with top-drop truncation, SAC-style auto-entropy, replay buffer).
+- **Learner**: **TQC** (off-policy, 2 quantile critics × 25 atoms with top-drop truncation, SAC-style auto-entropy, replay buffer).
 - **Sample efficiency**: left-right **symmetry augmentation** (mirror every transition) and a **diverse initial-state distribution** (30% fully-random resets for recovery from any configuration).
 - **Observation**: `[x, ẋ, cos θ₁, sin θ₁, θ̇₁, cos θ₂, sin θ₂, θ̇₂]` — cos/sin encoding eliminates angle discontinuities.
 

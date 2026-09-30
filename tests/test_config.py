@@ -65,18 +65,8 @@ def test_hardware_config_from_toml_defaults(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# config.py: load_ppo_config / load_tqc_config
+# config.py: load_tqc_config
 # ---------------------------------------------------------------------------
-
-
-def test_load_ppo_config_default_toml() -> None:
-    """load_ppo_config reads the shipped default.toml without error."""
-    from n_cartpole.config import load_ppo_config
-
-    cfg = load_ppo_config(_DEFAULT_TOML)
-    assert cfg.env.n_links == 2
-    assert cfg.gamma == pytest.approx(0.99)
-    assert cfg.lr > 0
 
 
 def test_load_tqc_config_default_toml() -> None:
@@ -87,30 +77,6 @@ def test_load_tqc_config_default_toml() -> None:
     assert cfg.env.n_links == 2
     assert cfg.gamma == pytest.approx(0.99)
     assert cfg.n_critics >= 1
-
-
-def test_load_ppo_config_with_hardware(tmp_path: Path) -> None:
-    """load_ppo_config builds HardwareConfig when [hardware] section is present."""
-    from n_cartpole.config import load_ppo_config
-
-    toml_text = textwrap.dedent("""
-        [physics]
-        M = 1.0
-        [env]
-        n_links = 1
-        [hardware.physics]
-        M = 1.1
-        [hardware.noise]
-        M_noise = 0.01
-        [hardware.pipeline]
-        delay_steps = 1
-    """)
-    p = tmp_path / "hw_ppo.toml"
-    p.write_text(toml_text)
-    cfg = load_ppo_config(p)
-    assert cfg.env.hardware is not None
-    assert cfg.env.hardware.physics.M == pytest.approx(1.1)
-    assert cfg.env.n_links == 1
 
 
 def test_load_tqc_config_with_hardware(tmp_path: Path) -> None:
@@ -133,19 +99,3 @@ def test_load_tqc_config_with_hardware(tmp_path: Path) -> None:
     cfg = load_tqc_config(p)
     assert cfg.env.hardware is not None
     assert cfg.env.hardware.delay_steps == 0
-
-
-def test_load_ppo_config_zero_workers(tmp_path: Path) -> None:
-    """n_workers=0 in TOML triggers auto-detection and resolves to >= 1."""
-    from n_cartpole.config import load_ppo_config
-
-    toml_text = textwrap.dedent("""
-        [physics]
-        [env]
-        [ppo]
-        n_workers = 0
-    """)
-    p = tmp_path / "zero_workers.toml"
-    p.write_text(toml_text)
-    cfg = load_ppo_config(p)
-    assert cfg.n_workers >= 1

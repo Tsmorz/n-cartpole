@@ -13,7 +13,7 @@ steps for an ESP32 over USB/UART).  Sensor noise is the Gaussian std-dev added
 to each observation dimension to match encoder / IMU noise floor.
 
 The canonical source of these values is ``config/default.toml``.  Load it
-with :meth:`HardwareConfig.from_toml` or via :func:`n_cartpole.config.load_ppo_config`.
+with :meth:`HardwareConfig.from_toml` or via :func:`n_cartpole.config.load_tqc_config`.
 """
 
 from __future__ import annotations

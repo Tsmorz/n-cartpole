@@ -1,7 +1,7 @@
 """Training-curve dashboard: turn a metrics CSV into an interactive HTML page.
 
-The trainer writes one row per iteration (return + PPO diagnostics). This renders
-them as small multiples — one measure per panel, never a shared dual axis — so
+A metrics CSV holds one row per iteration (return + learner diagnostics). This
+renders them as small multiples — one measure per panel, never a shared dual axis — so
 each curve keeps its own scale and stays legible, with hover read-outs and zoom.
 """
 
@@ -26,6 +26,8 @@ _PANELS: dict[str, tuple[str, str, str]] = {
     "entropy": ("Policy entropy", "nats", style.SERIES[2]),
     "approx_kl": ("Approx. KL", "KL / update", style.SERIES[3]),
     "clip_fraction": ("Clip fraction", "fraction", style.SERIES[4]),
+    # Goal-conditioned runs only (empty/NaN otherwise, and then not drawn).
+    "goal_success": ("Transition success", "fraction", style.SERIES[5]),
 }
 
 
@@ -52,7 +54,10 @@ def _read_metrics(csv_path: Path) -> dict[str, np.ndarray]:
         rows = list(csv.DictReader(f))
     if not rows:
         raise ValueError(f"No rows in {csv_path}")
-    return {k: np.array([float(r[k]) for r in rows]) for k in rows[0]}
+    return {
+        k: np.array([float(r[k]) if r[k] not in ("", None) else np.nan for r in rows])
+        for k in rows[0]
+    }
 
 
 def _to_rgba(hex_color: str, alpha: float) -> str:
@@ -66,13 +71,13 @@ def plot_training_curves(
     csv_path: str | Path,
     save_path: str | Path | None = None,
     *,
-    title: str = "PPO training",
+    title: str = "Training",
     target_kl: float | None = 0.03,
     open_browser: bool = True,
 ) -> go.Figure:
     """Render a training dashboard from a metrics CSV as an interactive HTML page.
 
-    Handles both the rich ``metrics.csv`` (return + PPO diagnostics) and the
+    Handles both the rich ``metrics.csv`` (return + diagnostics) and the
     legacy two-column ``returns.csv`` — it plots whichever measures are present.
 
     Args:
@@ -89,7 +94,7 @@ def plot_training_curves(
     cols = _read_metrics(Path(csv_path))
     x = cols.get("iteration", np.arange(1, len(next(iter(cols.values()))) + 1))
 
-    panels = [c for c in _PANELS if c in cols]
+    panels = [c for c in _PANELS if c in cols and np.isfinite(cols[c]).any()]
     if not panels:
         raise ValueError(f"No plottable columns in {csv_path}: found {list(cols)}")
 

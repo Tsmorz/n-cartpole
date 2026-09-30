@@ -6,9 +6,6 @@ TQC = SAC with a distributional critic. Each critic outputs a set of quantile
 "atoms" of the return distribution instead of a scalar Q; the target pools all
 atoms across critics and drops the largest few (truncation) to counter the
 overestimation bias that plagues value learning in high-dimensional control.
-
-This module is standalone; the PPO code (actor_critic.py, ppo.py) is untouched
-and remains available.
 """
 
 from __future__ import annotations

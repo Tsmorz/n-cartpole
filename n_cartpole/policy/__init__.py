@@ -1,6 +1,6 @@
-"""Actor-Critic networks and PPO update logic."""
+"""TQC actor/critic networks and the observation normalizer."""
 
-from n_cartpole.policy.actor_critic import Actor, Critic, RunningNorm
-from n_cartpole.policy.ppo import compute_gae, ppo_update
+from n_cartpole.policy.running_norm import RunningNorm
+from n_cartpole.policy.tqc import QuantileCritic, SquashedGaussianActor
 
-__all__ = ["Actor", "Critic", "RunningNorm", "compute_gae", "ppo_update"]
+__all__ = ["QuantileCritic", "RunningNorm", "SquashedGaussianActor"]

@@ -61,6 +61,7 @@ def animate_episode(
     rewards: np.ndarray | None = None,
     title: str | None = None,
     open_browser: bool = True,
+    goals: np.ndarray | None = None,
 ) -> go.Figure:
     """Render an interactive replay of a recorded episode.
 
@@ -73,6 +74,8 @@ def animate_episode(
         actions:  (T-1,) applied force per step; adds the force telemetry panel.
         rewards:  (T-1,) per-step reward; adds the reward telemetry panel.
         title:    page title.
+        goals:    (T, n) commanded target angles (goal-conditioned policies);
+                  drawn as dashed target lines on the uprightness panel.
         open_browser: open the written HTML in a browser.
 
     Returns:
@@ -88,10 +91,16 @@ def animate_episode(
 
     # --- Telemetry panels (right column): (name, x, y, color, extra) ---------
     panels: list[dict] = []
-    up_traces = [
+    up_traces: list[tuple] = [
         (f"θ{k + 1} upright", np.cos(states[:, 2 + 2 * k]), style.link_color(k))
         for k in range(n_links)
     ]
+    if goals is not None:
+        g = np.cos(np.asarray(goals)[:T])
+        up_traces += [
+            (f"θ{k + 1} target", g[:, k], style.link_color(k), "dash")
+            for k in range(n_links)
+        ]
     panels.append(
         {
             "title": "Uprightness (cos θ)",
@@ -241,14 +250,18 @@ def animate_episode(
                 row=row,
                 col=2,
             )
-        for name, y, color in pl["series"]:
+        for name, y, color, *dash in pl["series"]:
             fig.add_trace(
                 go.Scatter(
                     x=pl["t"],
                     y=y,
                     mode="lines",
                     name=name,
-                    line={"color": color, "width": 2},
+                    line={
+                        "color": color,
+                        "width": 1.5 if dash else 2,
+                        "dash": dash[0] if dash else None,
+                    },
                     fill="tozeroy" if pl.get("fill") else None,
                     fillcolor=style.rgba(style.REWARD, 0.15)
                     if pl.get("fill")

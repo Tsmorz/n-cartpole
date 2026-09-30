@@ -7,22 +7,19 @@ trainers and environment.
 
 Usage::
 
-    from n_cartpole.config import load_ppo_config, load_tqc_config
+    from n_cartpole.config import load_tqc_config
 
-    ppo_cfg = load_ppo_config("config/default.toml")
     tqc_cfg = load_tqc_config("config/default.toml")
 """
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from n_cartpole.training.off_policy import TQCConfig
-    from n_cartpole.training.trainer import TrainingConfig
 
 from n_cartpole.env.cartpole import EnvConfig
 from n_cartpole.env.dynamics import PhysicsParams
@@ -64,6 +61,7 @@ def _env_from(data: dict) -> EnvConfig:
             sensor_noise_std=pipe.get("sensor_noise_std", 0.0),
         )
 
+    hold = env_d.get("goal_hold_steps", [400, 800])
     return EnvConfig(
         physics=phys,
         n_links=env_d.get("n_links", 2),
@@ -72,47 +70,9 @@ def _env_from(data: dict) -> EnvConfig:
         init_random_prob=env_d.get("init_random_prob", 0.3),
         init_vel_noise=env_d.get("init_vel_noise", 2.0),
         hardware=hw,
-    )
-
-
-def load_ppo_config(path: str | Path) -> TrainingConfig:
-    """Construct a :class:`~n_cartpole.training.trainer.TrainingConfig` from TOML."""
-    # Import here to avoid circular deps at module level.
-    from n_cartpole.training.trainer import TrainingConfig
-
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-
-    env = _env_from(data)
-    ppo = data.get("ppo", {})
-
-    n_workers = ppo.get("n_workers", 0)
-    if n_workers == 0:
-        n_workers = max(1, min(8, (os.cpu_count() or 2) - 2))
-
-    return TrainingConfig(
-        env=env,
-        device=ppo.get("device", "auto"),
-        n_workers=n_workers,
-        steps_per_worker=ppo.get("steps_per_worker", 2048),
-        hidden=ppo.get("hidden", 256),
-        gamma=ppo.get("gamma", 0.99),
-        lam=ppo.get("lam", 0.95),
-        clip_eps=ppo.get("clip_eps", 0.20),
-        value_clip_eps=ppo.get("value_clip_eps", 0.20),
-        entropy_coeff_start=ppo.get("entropy_coeff_start", 0.0),
-        entropy_coeff_end=ppo.get("entropy_coeff_end", 0.0),
-        log_std_init=ppo.get("log_std_init", 1.6),
-        n_epochs=ppo.get("n_epochs", 10),
-        lr=ppo.get("lr", 3e-4),
-        max_grad_norm=ppo.get("max_grad_norm", 0.5),
-        mini_batch_size=ppo.get("mini_batch_size", 512),
-        normalize_returns=ppo.get("normalize_returns", True),
-        symmetry_augment=ppo.get("symmetry_augment", True),
-        target_kl=ppo.get("target_kl", 0.03),
-        n_iterations=ppo.get("n_iterations", 300),
-        checkpoint_every=ppo.get("checkpoint_every", 50),
-        log_every=ppo.get("log_every", 10),
+        goal_conditioned=env_d.get("goal_conditioned", False),
+        goal_hold_steps=tuple(hold) if hold else None,
+        goal_curriculum=env_d.get("goal_curriculum", True),
     )
 
 

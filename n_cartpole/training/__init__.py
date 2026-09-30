@@ -1,5 +1,5 @@
-"""Parallel rollout workers and PPO training loop."""
+"""Off-policy TQC training loop."""
 
-from n_cartpole.training.trainer import Trainer, TrainingConfig
+from n_cartpole.training.off_policy import TQCConfig, TQCTrainer
 
-__all__ = ["Trainer", "TrainingConfig"]
+__all__ = ["TQCConfig", "TQCTrainer"]
