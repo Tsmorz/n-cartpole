@@ -7,8 +7,10 @@ This is the sample-efficient, hardware-oriented alternative to PPO
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from pathlib import Path
 
+import torch
 from loguru import logger
 
 from n_cartpole.env.cartpole import EnvConfig
@@ -55,6 +57,14 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint directory (default: checkpoints/<single|double|triple|…>/tqc, "
         "chosen from --links)",
     )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Resume from a TQC checkpoint (architecture/env come from the "
+        "checkpoint; --steps is the new ABSOLUTE total). Pass tqc_latest.pt to "
+        "also restore the replay buffer.",
+    )
     return parser.parse_args()
 
 
@@ -81,7 +91,19 @@ def main() -> None:
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )
+    if args.resume is not None:
+        ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if ckpt.get("algo") != "tqc":
+            raise SystemExit(f"{args.resume} is not a TQC checkpoint")
+        cfg = dataclasses.replace(
+            ckpt["cfg"],
+            device=args.device,
+            total_steps=args.steps,
+            checkpoint_dir=args.checkpoint_dir or args.resume.parent,
+        )
     trainer = TQCTrainer(cfg)
+    if args.resume is not None:
+        trainer.load(args.resume)
     logger.info(
         f"TQC: {cfg.n_critics} critics x {cfg.n_quantiles} atoms, "
         f"drop {cfg.top_quantiles_to_drop}, symmetry={cfg.symmetry_augment}"

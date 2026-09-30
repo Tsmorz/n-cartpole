@@ -72,3 +72,45 @@ def test_tqc_update_returns_finite_metrics() -> None:
     metrics = trainer._update()
     for k, v in metrics.items():
         assert math.isfinite(v), f"{k} is not finite: {v}"
+
+
+def test_tqc_resume_roundtrip(tmp_path) -> None:
+    """Saving then loading restores weights, alpha, step and the replay buffer."""
+    cfg = TQCConfig(device="cpu", hidden=32, batch_size=32, n_quantiles=8)
+    a = TQCTrainer(cfg)
+    obs = np.zeros(8, dtype=np.float32)
+    for _ in range(40):
+        a.buffer.add(obs, np.zeros(1), 1.0, obs, False)
+    a.step = 123
+    with torch.no_grad():
+        a.log_alpha.fill_(-2.0)
+    path = tmp_path / "tqc_latest.pt"
+    a.save(path, with_buffer=True)
+
+    b = TQCTrainer(cfg)
+    b.load(path)
+    assert b.step == 123 and b.resumed
+    assert b.buffer.size == 40
+    assert b.log_alpha.item() == pytest.approx(-2.0)
+    for pa, pb in zip(a.actor.parameters(), b.actor.parameters(), strict=True):
+        assert torch.equal(pa, pb)
+
+
+def test_tqc_load_old_format_warm_starts(tmp_path) -> None:
+    """Checkpoints without learner state warm-start and infer the step from the name."""
+    cfg = TQCConfig(device="cpu", hidden=32, batch_size=32, n_quantiles=8)
+    a = TQCTrainer(cfg)
+    path = tmp_path / "tqc_0025000.pt"
+    torch.save(
+        {
+            "actor": a.actor.state_dict(),
+            "critic": a.critic.state_dict(),
+            "norm": a.norm.state_dict(),
+            "cfg": cfg,
+            "algo": "tqc",
+        },
+        path,
+    )
+    b = TQCTrainer(cfg)
+    b.load(path)
+    assert b.step == 25000 and b.buffer.size == 0

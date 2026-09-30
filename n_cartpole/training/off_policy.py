@@ -7,6 +7,7 @@ hardware. It keeps the PPO code path untouched — pick the algorithm at the CLI
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +87,31 @@ class ReplayBuffer:
         self.ptr = (i + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
+    def save(self, path: Path) -> None:
+        """Write the filled part of the buffer to an uncompressed ``.npz``."""
+        n = self.size
+        np.savez(
+            path,
+            obs=self.obs[:n],
+            act=self.act[:n],
+            rew=self.rew[:n],
+            next_obs=self.next_obs[:n],
+            done=self.done[:n],
+            ptr=self.ptr,
+        )
+
+    def load(self, path: Path) -> None:
+        """Restore transitions saved by :meth:`save` (truncated to capacity)."""
+        d = np.load(path)
+        n = min(len(d["obs"]), self.capacity)
+        self.obs[:n] = d["obs"][:n]
+        self.act[:n] = d["act"][:n]
+        self.rew[:n] = d["rew"][:n]
+        self.next_obs[:n] = d["next_obs"][:n]
+        self.done[:n] = d["done"][:n]
+        self.size = n
+        self.ptr = int(d["ptr"]) % self.capacity if n == self.capacity else n
+
     def sample(self, batch_size: int) -> tuple[np.ndarray, ...]:
         """Return a uniform random minibatch of transitions."""
         idx = np.random.randint(0, self.size, size=batch_size)
@@ -133,6 +159,10 @@ class TQCTrainer:
         self.buffer = ReplayBuffer(self.cfg.buffer_size, obs_dim)
         self.env = make_env(self.cfg.env)
         self._mirror = torch.as_tensor(mirror_sign, device=self.device)
+        # Env steps already taken (non-zero after ``load``); ``resumed`` skips the
+        # random-action warm-up because the actor is already trained.
+        self.step = 0
+        self.resumed = False
 
     @property
     def alpha(self) -> torch.Tensor:
@@ -224,20 +254,74 @@ class TQCTrainer:
             "entropy": float(-logp.mean().item()),
         }
 
-    def save(self, path: Path) -> None:
-        """Save a checkpoint compatible with scripts/play.py's actor loading."""
+    @staticmethod
+    def buffer_path(path: Path) -> Path:
+        """Replay-buffer file stored beside checkpoint ``path``."""
+        return path.with_name(path.stem + "_buffer.npz")
+
+    def save(self, path: Path, with_buffer: bool = False) -> None:
+        """Save a checkpoint compatible with scripts/play.py's actor loading.
+
+        Holds the full learner state (target critic, entropy temperature,
+        optimizers, step) so ``load`` can resume exactly. The replay buffer is
+        large, so it is written only when ``with_buffer`` is set (``*_latest``).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "actor": self.actor.state_dict(),
                 "critic": self.critic.state_dict(),
+                "critic_target": self.critic_target.state_dict(),
+                "log_alpha": self.log_alpha.detach().cpu(),
+                "actor_opt": self.actor_opt.state_dict(),
+                "critic_opt": self.critic_opt.state_dict(),
+                "alpha_opt": self.alpha_opt.state_dict(),
                 "norm": self.norm.state_dict(),
+                "step": self.step,
                 "cfg": self.cfg,
                 "algo": "tqc",
             },
             path,
         )
+        if with_buffer:
+            self.buffer.save(self.buffer_path(path))
         logger.info(f"Saved TQC checkpoint → {path}")
+
+    def load(self, path: Path) -> None:
+        """Resume from a checkpoint written by :meth:`save`.
+
+        Older checkpoints (actor/critic/norm only) warm-start: the target critic
+        is copied from the critic and alpha/optimizers start fresh. The replay buffer
+        is restored if ``<ckpt>_buffer.npz`` exists; otherwise learning pauses
+        until ``start_steps`` new transitions have been collected.
+        """
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.actor.load_state_dict(ckpt["actor"])
+        self.critic.load_state_dict(ckpt["critic"])
+        self.norm.load_state_dict(ckpt["norm"])
+        if "critic_target" in ckpt:
+            self.critic_target.load_state_dict(ckpt["critic_target"])
+            with torch.no_grad():
+                self.log_alpha.copy_(ckpt["log_alpha"].to(self.device))
+            self.actor_opt.load_state_dict(ckpt["actor_opt"])
+            self.critic_opt.load_state_dict(ckpt["critic_opt"])
+            self.alpha_opt.load_state_dict(ckpt["alpha_opt"])
+            self.step = int(ckpt["step"])
+        else:
+            self.critic_target.load_state_dict(ckpt["critic"])
+            logger.warning(
+                "Old-format checkpoint: warm start (fresh alpha/optimizers)."
+            )
+            m = re.search(r"tqc_(\d+)$", path.stem)
+            self.step = int(m.group(1)) if m else 0
+        buf = self.buffer_path(path)
+        if buf.exists():
+            self.buffer.load(buf)
+            logger.info(f"Restored {self.buffer.size} transitions ← {buf}")
+        else:
+            logger.warning("No replay buffer found; refilling before updates.")
+        self.resumed = True
+        logger.info(f"Loaded checkpoint ← {path} (step {self.step})")
 
     def train(self) -> None:
         """Run the off-policy training loop."""
@@ -248,11 +332,18 @@ class TQCTrainer:
         recent_returns: list[float] = []
         metrics: dict[str, float] = {}
 
-        pbar = tqdm(range(1, cfg.total_steps + 1), desc="TQC", unit="step")
+        pbar = tqdm(
+            range(self.step + 1, cfg.total_steps + 1),
+            desc="TQC",
+            unit="step",
+            initial=self.step,
+            total=cfg.total_steps,
+        )
         try:
             for step in pbar:
+                self.step = step
                 self.norm.update(torch.as_tensor(obs, device=self.device).unsqueeze(0))
-                if step < cfg.start_steps:
+                if not self.resumed and step < cfg.start_steps:
                     action = self.env.action_space.sample()
                 else:
                     with torch.no_grad():
@@ -278,7 +369,7 @@ class TQCTrainer:
                     ep_return = 0.0
                     ep_len = 0
 
-                if step >= cfg.start_steps and self.buffer.size >= cfg.batch_size:
+                if self.buffer.size >= max(cfg.start_steps, cfg.batch_size):
                     for _ in range(cfg.updates_per_step):
                         metrics = self._update()
 
@@ -297,9 +388,9 @@ class TQCTrainer:
                     )
                 if step % cfg.checkpoint_every == 0:
                     self.save(cfg.checkpoint_dir / f"tqc_{step:07d}.pt")
-                    self.save(cfg.checkpoint_dir / "tqc_latest.pt")
+                    self.save(cfg.checkpoint_dir / "tqc_latest.pt", with_buffer=True)
         except KeyboardInterrupt:
             logger.info("\nTQC training interrupted.")
         finally:
-            self.save(cfg.checkpoint_dir / "tqc_latest.pt")
+            self.save(cfg.checkpoint_dir / "tqc_latest.pt", with_buffer=True)
         logger.info("TQC training complete.")
