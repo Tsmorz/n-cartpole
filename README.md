@@ -9,7 +9,7 @@ TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionl
 
 <img src="docs/assets/tqc_swingup.gif" alt="TQC policy swinging up and balancing both poles" width="900" height="522">
 
-*A trained TQC policy swinging up and balancing both links upright, cart re-centered — return 817.5 over the episode.*
+*A trained TQC policy swinging up and balancing both links upright, cart re-centered — return 774.4 over the episode.*
 
 ## Install
 
@@ -111,7 +111,7 @@ is labeled with one letter per link, base link first:
 | `UD` | up            | down         | no — actively balanced       |
 | `DD` | down          | down         | yes — policy damps the swing |
 
-<img src="docs/assets/tqc_goal_transitions.gif" alt="Goal-conditioned TQC policy transitioning DD → UU → DU → UD → UU → DD" width="600">
+<img src="docs/assets/tqc_goal_transitions.gif" alt="Goal-conditioned TQC policy transitioning DD → UU → DU → UD → UU → DD" width="900">
 
 *One goal-conditioned network commanded through `UU@0, DU@6, UD@12, UU@18, DD@24` from the hanging-down start; every transition was reached.*
 
