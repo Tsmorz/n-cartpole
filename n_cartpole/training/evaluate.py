@@ -180,11 +180,14 @@ def evaluate_transition_metrics(
     trials: int = 3,
     seed: int = 0,
     randomize: PlantRandomization | None = None,
+    nominal: bool = False,
 ) -> tuple[TransitionStats, TransitionMetrics]:
     """Run ``trials`` episodes per (start, goal); return success stats + metrics.
 
     ``randomize`` evaluates on a per-episode perturbed TRUE plant (the policy only
     knows the nominal one), to check robustness to model error on a real rig.
+    Without it the checkpoint's own training-time randomization (if any) applies;
+    ``nominal=True`` forces the exact nominal plant instead.
     """
     if not bundle.goal_conditioned:
         raise ValueError("checkpoint is not goal-conditioned (train with --goals)")
@@ -192,7 +195,9 @@ def evaluate_transition_metrics(
         bundle.env_config,
         goal_hold_steps=None,  # one goal per episode, judged at truncation
         max_steps=int(round(seconds / bundle.physics.dt)),
-        randomize=randomize if randomize is not None else bundle.env_config.randomize,
+        randomize=None
+        if nominal
+        else (randomize if randomize is not None else bundle.env_config.randomize),
     )
     env = make_env(cfg)
     n_goals = len(env.goal_configs)

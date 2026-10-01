@@ -141,6 +141,27 @@ def parse_args() -> argparse.Namespace:
         help="Weight of the hold-gated force penalty (overrides [reward]; 0 = off)",
     )
     parser.add_argument(
+        "--smooth-temporal",
+        type=float,
+        default=0.0,
+        help="CAPS temporal smoothness weight on the actor's action change between "
+        "consecutive states (0 = off); suppresses high-frequency force dither",
+    )
+    parser.add_argument(
+        "--smooth-spatial",
+        type=float,
+        default=0.0,
+        help="CAPS spatial smoothness weight: action change under a small "
+        "observation perturbation, i.e. a cap on the actor's local gain (0 = off)",
+    )
+    parser.add_argument(
+        "--smooth-sigma",
+        type=float,
+        default=0.05,
+        help="Std of the observation perturbation (normalized units) for "
+        "--smooth-spatial",
+    )
+    parser.add_argument(
         "--resume",
         type=Path,
         default=None,
@@ -199,6 +220,9 @@ def main() -> None:
         symmetry_augment=not args.no_symmetry,
         target_entropy=args.target_entropy,
         hold_phase_steps=args.hold_phase_steps,
+        smooth_temporal=args.smooth_temporal,
+        smooth_spatial=args.smooth_spatial,
+        smooth_sigma=args.smooth_sigma,
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )

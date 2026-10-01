@@ -61,6 +61,11 @@ class SquashedGaussianActor(nn.Module):
         ).sum(-1)
         return action, log_prob
 
+    def mean_action(self, obs: torch.Tensor) -> torch.Tensor:
+        """Deterministic action scaled to [-1, 1], with gradients (for smoothness)."""
+        mean, _ = self._mean_logstd(obs)
+        return torch.tanh(mean)
+
     @torch.no_grad()
     def act(self, obs: torch.Tensor, *, deterministic: bool = False) -> torch.Tensor:
         """Return an action for interaction (mean action when deterministic)."""

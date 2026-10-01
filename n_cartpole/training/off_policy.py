@@ -96,6 +96,16 @@ class TQCConfig:
     # one hold segment (start near an equilibrium, stabilize it; see
     # ``EnvConfig.hold_noise``) before regular transitions take over.
     hold_phase_steps: int = 0
+    # Actor smoothness regularization (CAPS, Mysore et al. 2021) on the
+    # deterministic action scaled to [-1, 1]. A policy with a 1-step action delay
+    # and high local gain falls into a fast limit cycle at equilibrium (a 10 Hz+
+    # force dither the actuator could never follow). The temporal term penalizes
+    # the action change between consecutive states; the spatial term penalizes
+    # the change under a small perturbation of the normalized observation (a cap
+    # on the actor's local gain). Both weights 0 = off (the original update).
+    smooth_temporal: float = 0.0
+    smooth_spatial: float = 0.0
+    smooth_sigma: float = 0.05  # perturbation std in normalized-observation units
 
     total_steps: int = 200_000
     checkpoint_dir: Path = Path("checkpoints")
@@ -379,6 +389,9 @@ class TQCTrainer:
         a_new, logp = self.actor.sample(obs)
         q = self.critic(obs, a_new).mean(dim=(1, 2))  # (B,)
         actor_loss = (self.alpha.detach() * logp - q).mean()
+        smooth = self._smoothness_loss(obs, next_obs)
+        if smooth is not None:
+            actor_loss = actor_loss + smooth
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
@@ -401,7 +414,26 @@ class TQCTrainer:
             "actor_loss": float(actor_loss.item()),
             "alpha": float(self.alpha.item()),
             "entropy": float(-logp.mean().item()),
+            "smooth_loss": 0.0 if smooth is None else float(smooth.item()),
         }
+
+    def _smoothness_loss(
+        self, obs: torch.Tensor, next_obs: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Weighted CAPS penalties on the actor's deterministic action, or None."""
+        cfg = self.cfg
+        if cfg.smooth_temporal <= 0.0 and cfg.smooth_spatial <= 0.0:
+            return None
+        mu = self.actor.mean_action(obs)
+        loss = obs.new_zeros(())
+        if cfg.smooth_temporal > 0.0:
+            mu_next = self.actor.mean_action(next_obs)
+            loss = loss + cfg.smooth_temporal * (mu - mu_next).pow(2).mean()
+        if cfg.smooth_spatial > 0.0:
+            noisy = obs + cfg.smooth_sigma * torch.randn_like(obs)
+            mu_noisy = self.actor.mean_action(noisy)
+            loss = loss + cfg.smooth_spatial * (mu - mu_noisy).pow(2).mean()
+        return loss
 
     @staticmethod
     def buffer_path(path: Path) -> Path:

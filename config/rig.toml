@@ -48,7 +48,13 @@ tip_masses    = [0.08, 0.05]   # kg
 
 [env]
 n_links     = 2
-force_slew  = 800.0     # N/s: current-loop bandwidth limit on the applied force
+# Limit on how fast the applied force can change: 300 N/s = 3 N per 10 ms step
+# (20 % of the 15 N range; a full-scale reversal takes 100 ms). A belt-driven cart
+# should not be asked to reverse its drive force in a single control period:
+# belt/coupling compliance, driver current-rate limits and audible/thermal
+# stress all say so. (The previous 800 N/s let the sim apply +-13 N dither at
+# 11 Hz, which no real drive would follow.) Tune to your driver.
+force_slew  = 300.0
 
 # --- Hardware pipeline: delay + sensor noise, but NO sysID block in the obs ---
 # (the deployed actor stays a plain kinematics -> force network; robustness to

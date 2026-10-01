@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=5, help="Episodes per pair")
     parser.add_argument("--seed", type=int, default=0, help="Base random seed")
     parser.add_argument(
+        "--nominal",
+        action="store_true",
+        help="Force the exact nominal plant (checkpoints trained with --randomize "
+        "otherwise evaluate on their own training-time randomization)",
+    )
+    parser.add_argument(
         "--randomize",
         action="store_true",
         help="Evaluate on a randomly perturbed TRUE plant each episode (masses, "
@@ -49,6 +55,7 @@ def main() -> None:
         args.trials,
         args.seed,
         randomize=PlantRandomization() if args.randomize else None,
+        nominal=args.nominal,
     )
     labels = goal_labels(bundle.n_links)
     logger.info(
