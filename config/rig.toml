@@ -14,31 +14,40 @@
 [physics]
 dt        = 0.01     # 100 Hz control loop (comfortable for an ESP32-S3 + encoders)
 g         = 9.81
-
-# --- Cart + drive ----------------------------------------------------------
-# Belt drive: GT2 20-tooth pulley (pitch radius 6.35 mm) on a small BLDC/servo
-# with a current-loop driver. ~0.12 N·m peak torque / 6.35 mm = ~19 N at the
-# belt; derated to 15 N for margin (belt stretch, motor heating).
-force_max = 15.0     # peak cart force (N)
-# Effective moving mass: carriage + 2 linear bearings + encoder + belt clamp
-# (~0.55 kg) plus the motor/pulley inertia reflected to the belt, J/r^2
-# (~0.3-0.5 kg for a motor this size) -> ~1.0 kg.
-M         = 1.00
 b         = 0.10     # viscous friction of bearings + belt (N·s/m)
 
-# --- Rail ------------------------------------------------------------------
+# Sliding friction of the linear-rail bearings and belt (N): ~0.3-0.5 N is typical
+# for a small MGN12-class rail with light preload. Modeled as a regularized
+# Coulomb term; randomized x0.5-2 per episode. This is what a "0 N hold" fights.
+cart_coulomb        = 0.4
+cart_coulomb_vscale = 0.005   # m/s: below this the friction acts viscously
+
+# --- Rail ---
 # 1.0 m rail, 0.10 m carriage, 0.05 m bumper margin at each end -> the carriage
 # centre can travel +-0.40 m. Leaving this is a hard failure (end-stop hit).
 x_lim     = 0.40
 
-# --- Links -----------------------------------------------------------------
+# --- Links ---
 # Each link is a uniform 6061-T6 aluminium flat bar (25 x 3 mm, rho = 2700 kg/m^3)
 # between joint centres, plus a point-mass "tip assembly" at its distal joint
 # (bearing + clamp + magnetic encoder board on link 0's tip; an end weight on
-# link 1). Mass, centre of mass and inertia about the COM are DERIVED from these
-# (dynamics.link_from_parts) — measure your built links and compare.
+# link 1). Mass, centre of mass and inertia about the COM are DERIVED from the
+# [physics.links] table (dynamics.link_from_parts) — measure your built links.
 lengths        = 0.25       # joint-to-joint (m)
 joint_friction = 0.002      # 608-class bearing, viscous equivalent (N·m·s/rad)
+
+# --- Cart + belt drive ---
+# The effective moving mass M, the peak belt force force_max, and the speed v_noload
+# at which back-EMF stops the motor pushing further are all DERIVED from these
+# parts by config.drive_from_parts (edit the parts, not the results). A generic
+# 24 V frameless BLDC (~42 mm) on a GT2 20-tooth pulley (pitch radius 6.35 mm).
+[physics.drive]
+cart_mass      = 0.55      # carriage + 2 bearings + encoder + belt clamp (kg)
+rotor_inertia  = 1.5e-5    # rotor + pulley inertia (kg·m^2): reflects to the cart as J/r^2
+pulley_radius  = 0.00635   # m
+peak_torque    = 0.15      # N·m at stall (current-limited)
+noload_rpm     = 4000.0    # no-load speed at the supply voltage
+derate         = 0.65      # belt stretch, heating, driver margin on the peak force
 
 [physics.links]
 bar_width     = 0.025
@@ -64,8 +73,20 @@ delay_steps      = 1        # one 10 ms control period between command and actua
 sensor_noise_std = 0.0
 sysid_context    = false
 
+# --- Encoder sensing: what the ESP32 would actually read ----------------------
+# Joint angles: 14-bit magnetic encoders (2*pi/16384 rad steps) with ~0.03 deg
+# RMS noise. Cart: motor encoder, 4000 counts/rev on the 6.35 mm pulley (10 um).
+# Every velocity is DIFFERENCED from successive readings (noise = sqrt(2)*sigma/dt).
+[hardware.sensors]
+x_noise_std       = 2.0e-5
+angle_noise_std   = 5.0e-4
+x_resolution      = 1.0e-5
+angle_resolution  = 3.8349519697141e-4
+velocity_filter   = 0.0
+
 # --- True-plant randomization (per episode) -----------------------------------
 [randomize]
+cart_coulomb_scale   = [0.5, 2.0]    # rail friction varies with preload/dirt
 cart_mass_rel        = 0.10          # +-10 %
 cart_friction_scale  = [0.5, 2.0]    # belt/bearing friction is only known to a factor
 link_mass_rel        = 0.10

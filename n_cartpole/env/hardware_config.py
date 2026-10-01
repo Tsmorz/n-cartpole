@@ -26,6 +26,32 @@ from n_cartpole.env.dynamics import PhysicsParams
 
 
 @dataclass
+class SensorModel:
+    """Encoder-style sensing: noisy, quantized positions and finite-difference rates.
+
+    A real rig measures cart position and joint angles (encoders) and *derives*
+    every velocity by differencing successive readings, so the velocity channels
+    carry ``sqrt(2) * sigma / dt`` of noise plus a quantization staircase. With
+    this model the observation is built from those readings, not from the true
+    state (the reward still uses the true state). ``None`` on
+    :class:`HardwareConfig` keeps exact observations.
+
+    - ``x_noise_std`` (m), ``angle_noise_std`` (rad): Gaussian noise on each reading.
+    - ``x_resolution`` (m), ``angle_resolution`` (rad): quantization step (0 = none),
+      e.g. a 14-bit joint encoder is ``2*pi/16384`` rad.
+    - ``velocity_filter``: EMA coefficient ``alpha`` in ``[0, 1)`` on the differenced
+      velocities, ``v = alpha * v_prev + (1 - alpha) * v_diff`` (0 = unfiltered);
+      what a firmware low-pass would give, at the price of added lag.
+    """
+
+    x_noise_std: float = 0.0
+    angle_noise_std: float = 0.0
+    x_resolution: float = 0.0
+    angle_resolution: float = 0.0
+    velocity_filter: float = 0.0
+
+
+@dataclass
 class HardwareConfig:
     """Measured physical parameters and pipeline properties for a real rig.
 
@@ -62,6 +88,10 @@ class HardwareConfig:
     # and robustness to model error comes from ``EnvConfig.randomize`` instead.
     sysid_context: bool = True
 
+    # Encoder noise / quantization / differenced velocities (see ``SensorModel``).
+    # None = exact observations (apart from the uniform ``sensor_noise_std``).
+    sensors: SensorModel | None = None
+
     @classmethod
     def from_toml(cls, path: str | Path) -> HardwareConfig:
         """Load from the ``[hardware]`` section of a TOML config file.
@@ -88,4 +118,5 @@ class HardwareConfig:
             delay_steps=pipe_data.get("delay_steps", 1),
             sensor_noise_std=pipe_data.get("sensor_noise_std", 0.0),
             sysid_context=pipe_data.get("sysid_context", True),
+            sensors=SensorModel(**hw["sensors"]) if "sensors" in hw else None,
         )

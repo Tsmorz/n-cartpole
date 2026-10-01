@@ -38,6 +38,8 @@ class PlantRandomization:
     link_com_rel: float = 0.05
     link_inertia_rel: float = 0.15
     joint_friction_scale: tuple[float, float] = (0.5, 2.0)
+    # Rail-bearing sliding friction varies with preload, dirt and wear.
+    cart_coulomb_scale: tuple[float, float] = (0.5, 2.0)
     # Actuator gain error: the delivered force is ``gain * command``.
     force_gain_rel: float = 0.10
 
@@ -64,6 +66,7 @@ class PlantRandomization:
             nominal,
             M=nominal.M * float(rel(self.cart_mass_rel)),
             b=nominal.b * float(scale(self.cart_friction_scale)),
+            cart_coulomb=nominal.cart_coulomb * float(scale(self.cart_coulomb_scale)),
             force_max=nominal.force_max * gain,
             masses=tuple(nominal.link_masses(n) * rel(self.link_mass_rel, n)),
             lengths=tuple(lengths),

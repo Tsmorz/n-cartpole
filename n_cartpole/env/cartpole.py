@@ -40,6 +40,7 @@ from gymnasium import spaces
 
 from n_cartpole.env.dynamics import (
     PhysicsParams,
+    available_force,
     energy_range,
     goal_energy,
     step,
@@ -453,6 +454,10 @@ class NPendulumCartpole(gym.Env):
         self._plant = self.cfg.physics
         self._force_gain = 1.0
         self._prev_energy_potential = 0.0  # energy-shaping potential (see RewardShape)
+        # Encoder-style sensing state (see ``SensorModel``): last position reading
+        # and the differenced (optionally filtered) velocity estimate.
+        self._meas_prev: np.ndarray | None = None
+        self._meas_vel = np.zeros(n + 1)
 
         # Goal state. Non-conditioned mode keeps the all-upright target forever.
         self.goal_configs = goal_configs(n)
@@ -518,6 +523,8 @@ class NPendulumCartpole(gym.Env):
         self._prev_applied = 0.0
         self._reset_potentials()
         self._settled = 0
+        self._meas_prev = None
+        self._meas_vel = np.zeros(n + 1)
 
         if cfg.randomize is not None:
             self._plant, self._force_gain = cfg.randomize.sample(
@@ -706,6 +713,8 @@ class NPendulumCartpole(gym.Env):
                 np.clip(applied_F - self._prev_applied, -dF, dF)
             )
         self._prev_applied = applied_F
+        # Drive speed limit (back-EMF): what the motor can deliver at this speed.
+        applied_F = available_force(applied_F, float(self._state[1]), p)
 
         self._state = step(self._state, applied_F * self._force_gain, self._plant)
         self._step_count += 1
@@ -768,8 +777,11 @@ class NPendulumCartpole(gym.Env):
         Sensor noise applies to measured quantities only, never to the goal
         (a command, not a measurement).
         """
-        obs = encode_obs(self._state)
         hw = self.cfg.hardware
+        sensors = hw.sensors if hw is not None else None
+        obs = encode_obs(
+            self._state if sensors is None else self._measured_state(sensors)
+        )
         if hw is not None and self._sysid_context is not None:
             obs = np.concatenate([obs, self._sysid_context])
         if hw is not None and hw.sensor_noise_std > 0.0:
@@ -781,6 +793,36 @@ class NPendulumCartpole(gym.Env):
             goal_obs = np.cos(self._goal).astype(np.float32)
             obs = np.concatenate([obs[:k], goal_obs, obs[k:]])
         return obs
+
+    def _read(self, true_pos: np.ndarray, noise: np.ndarray, res: np.ndarray):
+        """Noisy, quantized encoder readings of the positions ``true_pos``."""
+        reading = true_pos + self.np_random.normal(0.0, 1.0, true_pos.shape) * noise
+        return np.where(
+            res > 0.0, np.round(reading / np.where(res > 0, res, 1.0)) * res, reading
+        )
+
+    def _measured_state(self, sensors) -> np.ndarray:
+        """State as the controller sees it: encoder positions, differenced rates.
+
+        Call once per control step (it advances the velocity estimator).
+        """
+        dt = self.cfg.physics.dt
+        n = self.n_links
+        noise = np.array([sensors.x_noise_std] + [sensors.angle_noise_std] * n)
+        res = np.array([sensors.x_resolution] + [sensors.angle_resolution] * n)
+        pos = np.concatenate(([self._state[0]], self._state[2::2]))
+        meas = self._read(pos, noise, res)
+        if self._meas_prev is None:  # first reading after reset: rates unknown -> 0
+            vel = np.zeros(n + 1)
+        else:
+            diff = (meas - self._meas_prev) / dt
+            a = sensors.velocity_filter
+            vel = a * self._meas_vel + (1.0 - a) * diff
+        self._meas_prev, self._meas_vel = meas, vel
+        out = np.empty(self.state_dim)
+        out[0], out[1] = meas[0], vel[0]
+        out[2::2], out[3::2] = meas[1:], vel[1:]
+        return out
 
     def _angle_potential(self, state: np.ndarray) -> float:
         """Goal-alignment product over links, in [0, 1].

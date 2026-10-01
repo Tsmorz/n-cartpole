@@ -51,6 +51,8 @@ def test_smoothness_off_by_default(tmp_path: Path) -> None:
 
 def test_smoothness_penalty_is_positive_and_trains_down(tmp_path: Path) -> None:
     """The penalty is active, differentiable, and minimizing it flattens the actor."""
+    torch.manual_seed(0)
+    np.random.seed(0)
     trainer = _trainer(tmp_path, smooth_temporal=5.0, smooth_spatial=5.0)
     obs, _, _, nxt, _ = trainer._sample_batch()
     before = trainer._smoothness_loss(obs, nxt)
@@ -64,7 +66,7 @@ def test_smoothness_penalty_is_positive_and_trains_down(tmp_path: Path) -> None:
         loss.backward()
         opt.step()
     after = trainer._smoothness_loss(obs, nxt)
-    assert after is not None and float(after) < 0.2 * float(before.detach())
+    assert after is not None and float(after.detach()) < 0.2 * float(before.detach())
     assert trainer._update()["smooth_loss"] >= 0.0  # the full update still runs
 
 
@@ -115,3 +117,62 @@ def test_legacy_tqc_config_has_no_smoothness() -> None:
     cfg.__dict__.update({"hidden": 32})
     assert cfg.smooth_temporal == 0.0 and cfg.smooth_spatial == 0.0
     assert pytest.approx(0.05) == cfg.smooth_sigma
+
+
+def _raw_batch(trainer: TQCTrainer, states: np.ndarray, goal: str) -> None:
+    """Install a raw observation batch for the given states and goal label."""
+    from n_cartpole.env.cartpole import encode_obs
+    from n_cartpole.env.goals import goal_configs, goal_index
+
+    target = goal_configs(2)[goal_index(goal, 2)]
+    rows = [np.concatenate([encode_obs(s), np.cos(target)]) for s in states]
+    trainer._raw_obs = torch.as_tensor(np.array(rows, dtype=np.float32))
+
+
+def test_alignment_gate_is_one_at_goal_and_zero_far(tmp_path: Path) -> None:
+    """The gate is the reward's alignment term: 1 at the goal, ~0 when opposite."""
+    trainer = _trainer(tmp_path, smooth_temporal=1.0, smooth_gate_power=2.0)
+    up = np.zeros(6)
+    down = np.array([0.0, 0.0, np.pi, 0.0, np.pi, 0.0])
+    _raw_batch(trainer, np.stack([up, down]), "UU")
+    gate = trainer._alignment_gate()
+    assert float(gate[0]) == pytest.approx(1.0) and float(gate[1]) < 1e-6
+    _raw_batch(trainer, np.stack([up, down]), "DD")  # the goal flips which is aligned
+    gate = trainer._alignment_gate()
+    assert float(gate[0]) < 1e-6 and float(gate[1]) == pytest.approx(1.0)
+    ungated = _trainer(tmp_path, smooth_temporal=1.0)
+    assert ungated._alignment_gate() == 1.0
+
+
+def test_gated_penalty_ignores_swing_up_states(tmp_path: Path) -> None:
+    """Far from the goal the gated penalty vanishes; at the goal it is the full one."""
+    trainer = _trainer(
+        tmp_path, smooth_temporal=5.0, smooth_spatial=5.0, smooth_gate_power=2.0
+    )
+    obs, _, _, nxt, _ = trainer._sample_batch()
+    full = float(
+        trainer._smoothness_loss(obs, nxt).detach()
+    )  # gate from the sampled batch
+    _raw_batch(
+        trainer, np.tile([0.0, 0.0, np.pi, 0.0, np.pi, 0.0], (obs.shape[0], 1)), "UU"
+    )
+    far = float(trainer._smoothness_loss(obs, nxt).detach())
+    _raw_batch(trainer, np.zeros((obs.shape[0], 6)), "UU")
+    near = float(trainer._smoothness_loss(obs, nxt).detach())
+    assert far < 1e-6 < near
+    assert full >= 0.0
+
+
+def test_smoothness_ramp_schedule(tmp_path: Path) -> None:
+    """Zero before the start step, linear over the ramp, full weight afterwards."""
+    trainer = _trainer(
+        tmp_path, smooth_temporal=5.0, smooth_start_step=100, smooth_ramp_steps=100
+    )
+    obs, _, _, nxt, _ = trainer._sample_batch()
+    trainer.step = 50
+    assert float(trainer._smoothness_loss(obs, nxt)) == 0.0
+    trainer.step = 150
+    half = float(trainer._smoothness_loss(obs, nxt).detach())
+    trainer.step = 250
+    full = float(trainer._smoothness_loss(obs, nxt).detach())
+    assert full > 0.0 and half == pytest.approx(0.5 * full, rel=1e-4)

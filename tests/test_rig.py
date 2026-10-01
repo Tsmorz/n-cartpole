@@ -101,7 +101,7 @@ def test_randomization_stays_within_ranges() -> None:
         seen_mass.add(round(float(m[0]), 6))
     assert len(seen_mass) > 100  # actually varies
     # The nominal params are never mutated.
-    assert nominal.force_max == 15.0
+    assert nominal.force_max == load_tqc_config(RIG).env.physics.force_max
 
 
 def test_env_integrates_a_randomized_plant_but_rewards_use_nominal() -> None:

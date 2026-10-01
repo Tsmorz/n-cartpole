@@ -90,6 +90,9 @@ class PhysicsParams:
         point-mass bob.
       - ``inertia``: moment of inertia of each link about its own centre of mass
         (kg·m²); ``0`` (default) for a point mass.
+
+    Cart-side non-idealities are opt-in: ``cart_coulomb`` (rail friction) and
+    ``v_noload`` (motor torque-speed limit).
       - ``joint_friction``: viscous friction at each link's proximal joint,
         ``N·m/(rad/s)`` (``joint_friction[0]`` is the cart-link0 joint).
 
@@ -116,6 +119,18 @@ class PhysicsParams:
     joint_friction: LinkSpec = 0.002
     com: LinkSpec | None = None
     inertia: LinkSpec = 0.0
+    # Cart sliding (Coulomb) friction of the rail bearings and belt, N, regularized
+    # as ``-cart_coulomb * tanh(x_dot / cart_coulomb_vscale)`` so the integrator
+    # stays well-behaved at zero speed (it acts like a stiff viscous term below
+    # ``cart_coulomb_vscale`` m/s). 0 = none (the original model).
+    cart_coulomb: float = 0.0
+    cart_coulomb_vscale: float = 0.005
+    # Drive speed limit: the cart speed (m/s) at which the motor's back-EMF has
+    # used up the supply and it can no longer push FURTHER in its direction of
+    # motion. The force available along the motion falls linearly,
+    # ``force_max * (1 - |x_dot| / v_noload)``; braking is unaffected. None = a
+    # constant ``force_max`` (the original model). See ``available_force``.
+    v_noload: float | None = None
 
     def link_masses(self, n: int) -> np.ndarray:
         """Return the ``(n,)`` array of link bob masses."""
@@ -286,6 +301,8 @@ def rhs(q: np.ndarray, qdot: np.ndarray, F: float, p: PhysicsParams) -> np.ndarr
     r = np.zeros(n + 1)
     # Cart row: external force, cart friction, and centrifugal reaction of links.
     r[0] = F - p.b * xd + float(np.sum(a * np.sin(theta) * thd**2))
+    if p.cart_coulomb > 0.0:
+        r[0] -= p.cart_coulomb * float(np.tanh(xd / p.cart_coulomb_vscale))
 
     # Gravity (positive: upright theta=0 is unstable) plus the centrifugal
     # coupling from every other link (no Coriolis cross terms in absolute
@@ -315,13 +332,25 @@ class _Model(NamedTuple):
     fric: np.ndarray  # joint friction per link
     b: float
     g: float
+    coulomb: float
+    coulomb_vscale: float
 
 
 def _model(p: PhysicsParams, n: int) -> _Model:
     m, _, a, d, K = _coeffs(p, n)
     Kd = K.copy()
     Kd[np.arange(n), np.arange(n)] = d
-    return _Model(p.M + float(m.sum()), a, Kd, K, p.joint_frictions(n), p.b, p.g)
+    return _Model(
+        p.M + float(m.sum()),
+        a,
+        Kd,
+        K,
+        p.joint_frictions(n),
+        p.b,
+        p.g,
+        p.cart_coulomb,
+        p.cart_coulomb_vscale,
+    )
 
 
 def _ode(t: float, state: np.ndarray, F: float, mdl: _Model) -> np.ndarray:
@@ -342,6 +371,8 @@ def _ode(t: float, state: np.ndarray, F: float, mdl: _Model) -> np.ndarray:
     thd2 = thd * thd
     r = np.empty(n + 1)
     r[0] = F - mdl.b * xd + float(np.dot(mdl.a * np.sin(theta), thd2))
+    if mdl.coulomb > 0.0:
+        r[0] -= mdl.coulomb * float(np.tanh(xd / mdl.coulomb_vscale))
     # Gravity + centrifugal coupling (see ``rhs``) + viscous joint friction.
     omega = thd.copy()
     omega[1:] -= thd[:-1]
@@ -429,3 +460,17 @@ def energy_range(p: PhysicsParams, n: int) -> float:
     """Span between the lowest and highest link potential energy (all-up vs all-down)."""
     _, _, a, _, _ = _coeffs(p, n)
     return float(2.0 * p.g * np.sum(a))
+
+
+def available_force(force: float, xd: float, p: PhysicsParams) -> float:
+    """Clip a commanded force to what the drive can deliver at cart speed ``xd``.
+
+    ``|force| <= force_max`` always. With ``v_noload`` set, a force pushing
+    further along the direction of motion is also limited by back-EMF to
+    ``force_max * (1 - |xd| / v_noload)`` (zero at ``v_noload``); a force against
+    the motion (braking) keeps the full ``force_max``.
+    """
+    limit = p.force_max
+    if p.v_noload is not None and force * xd > 0.0:
+        limit *= max(0.0, 1.0 - abs(xd) / p.v_noload)
+    return float(np.clip(force, -limit, limit))

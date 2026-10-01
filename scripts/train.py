@@ -155,6 +155,26 @@ def parse_args() -> argparse.Namespace:
         "observation perturbation, i.e. a cap on the actor's local gain (0 = off)",
     )
     parser.add_argument(
+        "--smooth-gate",
+        type=float,
+        default=0.0,
+        help="Gate the smoothness penalty by closeness to the goal, alignment**N "
+        "(0 = ungated). Quiet only when settled; swing-up stays aggressive.",
+    )
+    parser.add_argument(
+        "--smooth-start",
+        type=int,
+        default=0,
+        help="Env step at which the smoothness penalty starts ramping in",
+    )
+    parser.add_argument(
+        "--smooth-ramp",
+        type=int,
+        default=0,
+        help="Steps over which the smoothness penalty ramps from 0 to full weight "
+        "(0 = immediate once started)",
+    )
+    parser.add_argument(
         "--smooth-sigma",
         type=float,
         default=0.05,
@@ -223,6 +243,9 @@ def main() -> None:
         smooth_temporal=args.smooth_temporal,
         smooth_spatial=args.smooth_spatial,
         smooth_sigma=args.smooth_sigma,
+        smooth_gate_power=args.smooth_gate,
+        smooth_start_step=args.smooth_start,
+        smooth_ramp_steps=args.smooth_ramp,
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )

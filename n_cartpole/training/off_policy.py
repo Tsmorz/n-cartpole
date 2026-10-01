@@ -106,6 +106,16 @@ class TQCConfig:
     smooth_temporal: float = 0.0
     smooth_spatial: float = 0.0
     smooth_sigma: float = 0.05  # perturbation std in normalized-observation units
+    # Gate the penalty by closeness to the goal, ``alignment ** smooth_gate_power``,
+    # where alignment is the reward's angle potential (1 at the goal, ~0 hanging
+    # away from it) computed from the raw observation. 0 = ungated. Swing-up needs
+    # aggressive, state-sensitive actions, and an ungated penalty under noisy
+    # observations was found to stall it entirely; the quiet is only wanted at rest.
+    smooth_gate_power: float = 0.0
+    # Ramp the penalty in linearly after ``smooth_start_step`` over
+    # ``smooth_ramp_steps`` env steps (0 = switch on at full weight immediately).
+    smooth_start_step: int = 0
+    smooth_ramp_steps: int = 0
 
     total_steps: int = 200_000
     checkpoint_dir: Path = Path("checkpoints")
@@ -341,7 +351,9 @@ class TQCTrainer:
             t(next_obs),
             t(done),
         )
+        self._raw_obs = obs_t  # un-normalized, for goal-alignment gating
         if self.cfg.symmetry_augment:
+            self._raw_obs = torch.cat([obs_t, obs_t * self._mirror])
             obs_t = torch.cat([obs_t, obs_t * self._mirror])
             next_t = torch.cat([next_t, next_t * self._mirror])
             act_t = torch.cat([act_t, -act_t])
@@ -424,16 +436,56 @@ class TQCTrainer:
         cfg = self.cfg
         if cfg.smooth_temporal <= 0.0 and cfg.smooth_spatial <= 0.0:
             return None
+        scale = 1.0
+        if cfg.smooth_ramp_steps > 0:
+            scale = min(
+                1.0,
+                max(0.0, (self.step - cfg.smooth_start_step) / cfg.smooth_ramp_steps),
+            )
+        elif self.step < cfg.smooth_start_step:
+            scale = 0.0
+        if scale <= 0.0:
+            return obs.new_zeros(())
+        gate = self._alignment_gate()
         mu = self.actor.mean_action(obs)
         loss = obs.new_zeros(())
         if cfg.smooth_temporal > 0.0:
             mu_next = self.actor.mean_action(next_obs)
-            loss = loss + cfg.smooth_temporal * (mu - mu_next).pow(2).mean()
+            loss = (
+                loss
+                + cfg.smooth_temporal
+                * (gate * (mu - mu_next).pow(2).squeeze(-1)).mean()
+            )
         if cfg.smooth_spatial > 0.0:
             noisy = obs + cfg.smooth_sigma * torch.randn_like(obs)
             mu_noisy = self.actor.mean_action(noisy)
-            loss = loss + cfg.smooth_spatial * (mu - mu_noisy).pow(2).mean()
-        return loss
+            loss = (
+                loss
+                + cfg.smooth_spatial
+                * (gate * (mu - mu_noisy).pow(2).squeeze(-1)).mean()
+            )
+        return scale * loss
+
+    def _alignment_gate(self) -> torch.Tensor | float:
+        """Per-sample ``alignment ** power`` from the raw observation (1.0 if ungated).
+
+        ``alignment = prod_i (0.5 + 0.5 cos(theta_i - theta*_i))`` and, because the
+        targets are 0 or pi, ``cos(theta - theta*) = cos(theta) * cos(theta*)``: the
+        link cosines come from the kinematic block and the goal cosines from the goal
+        block (all upright for a non-goal swing-up run).
+        """
+        power = self.cfg.smooth_gate_power
+        if power <= 0.0:
+            return 1.0
+        n = self.cfg.env.n_links
+        raw = self._raw_obs
+        cos_theta = torch.stack([raw[:, 2 + 3 * i] for i in range(n)], dim=1)
+        if self.goal_conditioned:
+            goal = raw[:, self._goal_slice]
+        else:
+            goal = torch.ones_like(cos_theta)
+        align = (0.5 + 0.5 * cos_theta * goal).prod(dim=1)
+        return align.clamp(min=0.0).pow(power).detach()
 
     @staticmethod
     def buffer_path(path: Path) -> Path:
