@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -42,6 +43,23 @@ class PlantRandomization:
     cart_coulomb_scale: tuple[float, float] = (0.5, 2.0)
     # Actuator gain error: the delivered force is ``gain * command``.
     force_gain_rel: float = 0.10
+
+    def scaled(self, realism: float) -> PlantRandomization:
+        """Ranges shrunk toward nominal: ``realism`` 0 = none, 1 = as configured.
+
+        Relative spans scale linearly; the log-uniform ``(lo, hi)`` factors become
+        ``(lo ** realism, hi ** realism)``, which keeps them multiplicative and
+        reaches exactly 1 at ``realism = 0``.
+        """
+        r = float(np.clip(realism, 0.0, 1.0))
+        fields: dict[str, Any] = {}
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, tuple):
+                fields[f.name] = (v[0] ** r, v[1] ** r)
+            else:
+                fields[f.name] = v * r
+        return PlantRandomization(**fields)
 
     def sample(
         self, nominal: PhysicsParams, n: int, rng: np.random.Generator

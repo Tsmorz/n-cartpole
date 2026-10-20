@@ -80,20 +80,27 @@ tasks:
   test:
     desc: Run the test suite with coverage
     cmds:
-      - uv run pytest --cov=n_cartpole/ --cov-report=term-missing --cov-report=lcov:coverage.lcov --no-cov-on-fail --cov-fail-under=90
+      - uv run pytest {{.PYTEST_FLAGS}} --cov=n_cartpole/ --cov-report=term-missing --cov-report=lcov:coverage.lcov --no-cov-on-fail --cov-fail-under=90
 
   format:
     desc: Format, lint, and type-check the code
     cmds:
-      - uv run ruff format
-      - uv run ruff check --fix
-      - uv run mypy n_cartpole/ tests/ scripts/ --ignore-missing-imports
+      - uv run ruff format {{.RUFF_FLAGS}}
+      - uv run ruff check --fix {{.RUFF_FLAGS}}
+      - uv run mypy n_cartpole/ tests/ scripts/ --ignore-missing-imports {{.MYPY_FLAGS}}
 
   ci:
-    desc: Run the full CI suite locally (format + test)
+    desc: Run the full CI suite locally (format + test), bypassing tool caches like a fresh CI runner
     cmds:
+      # A stale .mypy_cache once hid a type error that failed on GitHub, so
+      # nothing here reads ruff/mypy/pytest caches.
       - task: format
+        vars:
+          RUFF_FLAGS: --no-cache
+          MYPY_FLAGS: --no-incremental --cache-dir=/dev/null
       - task: test
+        vars:
+          PYTEST_FLAGS: -p no:cacheprovider
 
   clean:
     desc: Remove the virtual environment, caches, build artifacts, and checkpoints

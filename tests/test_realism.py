@@ -130,11 +130,11 @@ def test_sensor_model_noise_quantization_and_differenced_velocity() -> None:
         s = env.get_state()
         vel_err.append(obs[7] - s[5])  # link-1 rate error at the hanging pose
         ang_q.append(obs[4])
-    vel_err = np.array(vel_err)
+    vel_arr = np.array(vel_err)
     # differenced noise: sqrt(2) * sigma / dt (plus the small quantization term)
     expected = math.sqrt(2) * 5e-4 / 0.01
-    assert 0.6 * expected < vel_err.std() < 1.6 * expected
-    assert abs(vel_err.mean()) < 0.05
+    assert 0.6 * expected < vel_arr.std() < 1.6 * expected
+    assert abs(vel_arr.mean()) < 0.05
     # the controller's x reading sits on the encoder grid
     x_read = obs[0]
     assert abs(x_read / 1e-4 - round(x_read / 1e-4)) < 1e-3
@@ -142,12 +142,12 @@ def test_sensor_model_noise_quantization_and_differenced_velocity() -> None:
 
 def test_velocity_filter_smooths_differenced_rates() -> None:
     """The EMA filter reduces velocity noise (modestly: differenced noise is anti-correlated)."""
-    base = dict(angle_noise_std=5e-4)
     stds = []
     for alpha in (0.0, 0.8):
         cfg = EnvConfig(
             hardware=HardwareConfig(
-                sysid_context=False, sensors=SensorModel(velocity_filter=alpha, **base)
+                sysid_context=False,
+                sensors=SensorModel(velocity_filter=alpha, angle_noise_std=5e-4),
             ),
             max_steps=2000,
             init_random_prob=0.0,

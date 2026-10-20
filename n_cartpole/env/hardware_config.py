@@ -49,6 +49,20 @@ class SensorModel:
     x_resolution: float = 0.0
     angle_resolution: float = 0.0
     velocity_filter: float = 0.0
+    # How velocities are obtained from the readings: "diff" (finite difference,
+    # optionally EMA-filtered by ``velocity_filter``) or "ekf" (a model-based
+    # extended Kalman filter, see ``env/estimator.py``; no filter lag). The EKF's
+    # unmodelled-force and unmodelled-link-acceleration assumptions are tuning knobs.
+    estimator: str = "diff"
+    ekf_force_std: float = 0.5
+    ekf_accel_std: float = 2.0
+
+    def __post_init__(self) -> None:
+        """Reject an unknown estimator name at construction."""
+        if self.estimator not in ("diff", "ekf"):
+            raise ValueError(
+                f"estimator must be 'diff' or 'ekf', got {self.estimator!r}"
+            )
 
 
 @dataclass

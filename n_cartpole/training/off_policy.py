@@ -23,6 +23,7 @@ from n_cartpole.env.cartpole import obs_dim as kin_obs_dim
 from n_cartpole.env.double_cartpole import EnvConfig
 from n_cartpole.env.factory import env_spec, make_env
 from n_cartpole.env.goals import TransitionStats, goal_configs
+from n_cartpole.policy.noise import ExplorationNoise
 from n_cartpole.policy.running_norm import RunningNorm
 from n_cartpole.policy.tqc import (
     QuantileCritic,
@@ -116,6 +117,23 @@ class TQCConfig:
     # ``smooth_ramp_steps`` env steps (0 = switch on at full weight immediately).
     smooth_start_step: int = 0
     smooth_ramp_steps: int = 0
+    # Exploration noise color: "white" (independent every step, the original) or
+    # "pink" (spectral exponent ``explore_beta``, temporally correlated within an
+    # episode; see ``policy/noise.py``). Only the exploration draw changes; the
+    # learned std, the updates and the evaluation policy are untouched.
+    explore_noise: str = "white"
+    explore_beta: float = 1.0
+    # Realism curriculum: from ``env.realism`` (the starting level) ramp the rail
+    # friction / sensor noise / plant randomization linearly up to 1 between
+    # ``realism_ramp_start`` and ``realism_ramp_start + realism_ramp_steps`` env
+    # steps. 0 steps = no ramp (the env's ``realism`` is used throughout).
+    realism_ramp_start: int = 0
+    realism_ramp_steps: int = 0
+    # Critic warm-up: for this many env steps after a (re)start, update only the
+    # critic (and soft target); the actor and temperature stay frozen. Fine-tuning a
+    # good policy on a new observation pipeline or plant otherwise updates the actor
+    # against a critic that has not yet fit the new data, which wrecks the policy.
+    actor_warmup_steps: int = 0
 
     total_steps: int = 200_000
     checkpoint_dir: Path = Path("checkpoints")
@@ -190,6 +208,11 @@ class ReplayBuffer:
             ptr=self.ptr,
             **{k: getattr(self, k)[:n] for k in self._RAW if self.has_raw},
         )
+
+    def clear(self) -> None:
+        """Forget every stored transition (keeps the allocated arrays)."""
+        self.ptr = 0
+        self.size = 0
 
     def load(self, path: Path) -> None:
         """Restore transitions saved by :meth:`save` (truncated to capacity)."""
@@ -296,6 +319,17 @@ class TQCTrainer:
         # Env steps already taken (non-zero after ``load``); ``resumed`` skips the
         # random-action warm-up because the actor is already trained.
         self.step = 0
+        self._actor_freeze_until = 0  # actor frozen while step < this (critic warm-up)
+        if self.cfg.explore_noise not in ("white", "pink"):
+            raise ValueError(
+                f"explore_noise must be 'white' or 'pink', got {self.cfg.explore_noise!r}"
+            )
+        # Pink exploration needs one sequence per episode; sized to an episode.
+        self._explore = ExplorationNoise(
+            act_dim=ACT_DIM,
+            beta=self.cfg.explore_beta,
+            horizon=max(self.cfg.env.max_steps + 1, 2),
+        )
         self.resumed = False
 
     @property
@@ -397,6 +431,16 @@ class TQCTrainer:
         critic_loss.backward()
         self.critic_opt.step()
 
+        if self.step < self._actor_freeze_until:  # critic warm-up: actor/alpha frozen
+            self._soft_update_targets()
+            return {
+                "critic_loss": float(critic_loss.item()),
+                "actor_loss": 0.0,
+                "alpha": float(self.alpha.item()),
+                "entropy": 0.0,
+                "smooth_loss": 0.0,
+            }
+
         # Actor: maximize mean atom value minus entropy-weighted log-prob.
         a_new, logp = self.actor.sample(obs)
         q = self.critic(obs, a_new).mean(dim=(1, 2))  # (B,)
@@ -414,12 +458,7 @@ class TQCTrainer:
         alpha_loss.backward()
         self.alpha_opt.step()
 
-        # Soft target update.
-        with torch.no_grad():
-            for p, tp in zip(
-                self.critic.parameters(), self.critic_target.parameters(), strict=True
-            ):
-                tp.mul_(1.0 - cfg.tau).add_(cfg.tau * p)
+        self._soft_update_targets()
 
         return {
             "critic_loss": float(critic_loss.item()),
@@ -428,6 +467,15 @@ class TQCTrainer:
             "entropy": float(-logp.mean().item()),
             "smooth_loss": 0.0 if smooth is None else float(smooth.item()),
         }
+
+    def _soft_update_targets(self) -> None:
+        """Polyak-average the critic into the target critic."""
+        tau = self.cfg.tau
+        with torch.no_grad():
+            for p, tp in zip(
+                self.critic.parameters(), self.critic_target.parameters(), strict=True
+            ):
+                tp.mul_(1.0 - tau).add_(tau * p)
 
     def _smoothness_loss(
         self, obs: torch.Tensor, next_obs: torch.Tensor
@@ -579,6 +627,16 @@ class TQCTrainer:
             for name, a, b in [
                 ("n_links", src.env.n_links, cfg.env.n_links),
                 ("hardware", src.env.hardware is None, cfg.env.hardware is None),
+                (
+                    "action_history",
+                    getattr(src.env, "action_history", 0),
+                    cfg.env.action_history,
+                ),
+                (
+                    "obs_history",
+                    getattr(src.env, "obs_history", 0),
+                    cfg.env.obs_history,
+                ),
                 ("hidden", src.hidden, cfg.hidden),
                 ("n_critics", src.n_critics, cfg.n_critics),
                 ("n_quantiles", src.n_quantiles, cfg.n_quantiles),
@@ -629,14 +687,30 @@ class TQCTrainer:
             next_obs, _, terminated, truncated, _ = self._store_step(
                 env, obs, self._policy_action(obs)
             )
-            obs = env.reset()[0] if terminated or truncated else next_obs
+            if terminated or truncated:
+                obs = env.reset()[0]
+                self._explore.reset()
+            else:
+                obs = next_obs
         logger.info(f"Seeded replay buffer with {n_steps} policy steps")
+
+    def realism_at(self, step: int) -> float:
+        """Realism level scheduled for env step ``step`` (see ``realism_ramp_*``)."""
+        cfg = self.cfg
+        base = float(cfg.env.realism)
+        if cfg.realism_ramp_steps <= 0:
+            return base
+        frac = (step - cfg.realism_ramp_start) / cfg.realism_ramp_steps
+        return base + (1.0 - base) * float(np.clip(frac, 0.0, 1.0))
 
     def _policy_action(self, obs: np.ndarray) -> np.ndarray:
         """Sample an exploration action from the actor for one observation."""
+        noise = None
+        if self.cfg.explore_noise == "pink":
+            noise = torch.as_tensor(self._explore.next(), device=self.device)
         with torch.no_grad():
             return (
-                self.actor.act(self._normalize(obs).unsqueeze(0))
+                self.actor.act(self._normalize(obs).unsqueeze(0), noise=noise)
                 .squeeze(0)
                 .cpu()
                 .numpy()
@@ -672,7 +746,14 @@ class TQCTrainer:
         self.env.hold_only = in_hold_phase(self.step)
         if self.env.hold_only:
             logger.info(f"Hold-only episodes until step {cfg.hold_phase_steps}")
+        self._actor_freeze_until = self.step + cfg.actor_warmup_steps
+        if cfg.actor_warmup_steps:
+            logger.info(
+                f"Critic warm-up: actor frozen until step {self._actor_freeze_until}"
+            )
+        self.env.set_realism(self.realism_at(self.step))
         obs, _ = self.env.reset()
+        self._explore.reset()
         ep_return = 0.0
         ep_len = 0
         recent_returns: list[float] = []
@@ -709,7 +790,9 @@ class TQCTrainer:
                     if self.env.hold_only and not in_hold_phase(step):
                         logger.info(f"Hold phase over at step {step}")
                     self.env.hold_only = in_hold_phase(step)
+                    self.env.set_realism(self.realism_at(step))
                     obs, _ = self.env.reset()
+                    self._explore.reset()
                     ep_return = 0.0
                     ep_len = 0
 
@@ -728,7 +811,8 @@ class TQCTrainer:
                         f"step {step:7d} | return={np.mean(recent_returns):6.1f} | "
                         f"critic={metrics.get('critic_loss', 0):.3f} | "
                         f"actor={metrics.get('actor_loss', 0):.3f} | "
-                        f"alpha={metrics.get('alpha', 0):.3f}"
+                        f"alpha={metrics.get('alpha', 0):.3f} | "
+                        f"realism={self.env._realism:.2f}"
                     )
                     if self.goal_conditioned:
                         logger.info(

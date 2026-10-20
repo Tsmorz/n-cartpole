@@ -67,12 +67,27 @@ class SquashedGaussianActor(nn.Module):
         return torch.tanh(mean)
 
     @torch.no_grad()
-    def act(self, obs: torch.Tensor, *, deterministic: bool = False) -> torch.Tensor:
-        """Return an action for interaction (mean action when deterministic)."""
+    def act(
+        self,
+        obs: torch.Tensor,
+        *,
+        deterministic: bool = False,
+        noise: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return an action for interaction (mean action when deterministic).
+
+        ``noise`` (same shape as the action, unit variance) replaces the i.i.d.
+        Gaussian draw with a supplied sample — e.g. one step of a pink-noise
+        sequence — so exploration can be temporally correlated while keeping the
+        policy's learned std.
+        """
         mean, log_std = self._mean_logstd(obs)
         if deterministic:
             return torch.tanh(mean) * self.force_max
-        u = Normal(mean, log_std.exp()).sample()
+        if noise is None:
+            u = Normal(mean, log_std.exp()).sample()
+        else:
+            u = mean + log_std.exp() * noise.to(mean.dtype).reshape(mean.shape)
         return torch.tanh(u) * self.force_max
 
 

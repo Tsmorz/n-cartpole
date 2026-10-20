@@ -31,6 +31,7 @@ SysID context (optional):
 from __future__ import annotations
 
 import collections
+import dataclasses
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -46,6 +47,7 @@ from n_cartpole.env.dynamics import (
     step,
     total_energy_batch,
 )
+from n_cartpole.env.estimator import StateEKF
 from n_cartpole.env.goals import (
     FROM_OTHER,
     TransitionStats,
@@ -124,6 +126,28 @@ class EnvConfig:
     randomize: PlantRandomization | None = None
     # Optional extra reward terms (see ``RewardShape``); None = original reward.
     reward_shape: RewardShape | None = None
+    # Observation extras, appended after [kinematics, goal, sysID] (0 = none):
+    # - ``action_history``: the last this-many COMMANDED forces, newest first,
+    #   divided by force_max. With an action delay and a slew limit the plant state
+    #   alone does not determine what the actuator is about to do; the command in
+    #   flight does, and on hardware the firmware knows it exactly.
+    # - ``obs_history``: this many past measurement frames (the kinematic block as
+    #   the sensors delivered it, newest first), so the policy can learn its own
+    #   velocity filtering instead of relying on a hand-set lag.
+    action_history: int = 0
+    obs_history: int = 0
+    # How strongly the real-world non-idealities are applied, in [0, 1]. Scales the
+    # rail friction, the encoder noise / quantization, and the plant randomization
+    # ranges together; 0 = a clean plant, 1 = everything in the config. Delay, slew
+    # limit, drive limits and joint friction are unaffected (actuator realism is not
+    # a difficulty to be ramped). Used to learn the task on an easy plant first and
+    # then add realism back (see ``TQCConfig.realism_ramp_*``).
+    realism: float = 1.0
+    # "absolute": the action is the commanded force. "delta": the action is the
+    # change of the commanded force, ``action / force_max`` of the actuator's rate
+    # limit (``force_slew * dt``) per step, so the command trajectory is smooth and
+    # realizable by construction. Needs ``force_slew`` and ``action_history >= 1``.
+    action_mode: str = "absolute"
 
     # Goal-conditioned transitions between equilibria (see module docstring).
     # False keeps the original all-upright swing-up task and observation.
@@ -152,9 +176,20 @@ class EnvConfig:
 
 # Reward constants (shared by the env and the vectorized ``goal_reward`` used for
 # replay-buffer goal relabeling). See ``NPendulumCartpole`` for their meaning.
-SHAPING_GAMMA = 0.99
+SHAPING_GAMMA = 0.99  # per 10 ms (100 Hz) control step; see ``shaping_gamma``
 SHAPING_WEIGHT = 0.2
 RATE_PENALTY = 0.2
+
+
+def shaping_gamma(physics: PhysicsParams) -> float:
+    """Shaping discount for the control period, matching a fixed time horizon.
+
+    ``SHAPING_GAMMA`` is the discount per 10 ms step; at another control rate the
+    same horizon in seconds needs ``gamma ** (dt / 0.01)`` (0.995 at 200 Hz).
+    Potential-based shaping is policy-invariant only when this equals the
+    learner's discount, so the trainer defaults to the same value.
+    """
+    return float(SHAPING_GAMMA ** (physics.dt / 0.01))
 
 
 def goal_dim(n_links: int) -> int:
@@ -175,8 +210,17 @@ def sysid_dim(n_links: int) -> int:
     return 2 + 3 * n_links
 
 
+def extra_obs_dim(n_links: int, action_history: int = 0, obs_history: int = 0) -> int:
+    """Width of the observation extras: past forces plus past kinematic frames."""
+    return action_history + obs_history * obs_dim(n_links)
+
+
 def obs_mirror_sign(
-    n_links: int, with_sysid: bool = False, with_goal: bool = False
+    n_links: int,
+    with_sysid: bool = False,
+    with_goal: bool = False,
+    action_history: int = 0,
+    obs_history: int = 0,
 ) -> np.ndarray:
     """Left-right mirror sign vector for the observation of ``n_links``.
 
@@ -186,13 +230,20 @@ def obs_mirror_sign(
     unchanged, and SysID params (masses, lengths, frictions) are symmetric under
     mirroring, so both blocks have sign +1.
 
-    Layout: ``[kinematic, goal (if with_goal), sysID (if with_sysid)]``.
+    Past commanded forces are odd (-1); past kinematic frames mirror like the
+    kinematic block.
+
+    Layout: ``[kinematic, goal (if with_goal), sysID (if with_sysid),
+    past forces, past frames]``.
     """
-    parts = [np.array([-1, -1] + [1, -1, -1] * n_links, dtype=np.float32)]
+    kin = np.array([-1, -1] + [1, -1, -1] * n_links, dtype=np.float32)
+    parts = [kin]
     if with_goal:
         parts.append(np.ones(goal_dim(n_links), dtype=np.float32))
     if with_sysid:
         parts.append(np.ones(sysid_dim(n_links), dtype=np.float32))
+    parts.append(-np.ones(action_history, dtype=np.float32))
+    parts.extend([kin] * obs_history)
     return np.concatenate(parts)
 
 
@@ -300,7 +351,8 @@ def goal_reward(
     the shaping term is always taken under the current goal). Used to relabel
     replay-buffer transitions with a different goal.
     """
-    shaping = SHAPING_GAMMA * angle_potential(
+    gamma = shaping_gamma(physics)
+    shaping = gamma * angle_potential(
         np.asarray(state)[..., 2::2], goal
     ) - angle_potential(np.asarray(prev_state)[..., 2::2], goal)
     reward = (
@@ -308,7 +360,7 @@ def goal_reward(
     )
     if shape is not None and shape.energy_weight > 0.0:
         reward = reward + (
-            SHAPING_GAMMA * energy_potential(state, goal, physics, shape)
+            gamma * energy_potential(state, goal, physics, shape)
             - energy_potential(prev_state, goal, physics, shape)
         )
     return reward
@@ -426,6 +478,7 @@ class NPendulumCartpole(gym.Env):
             obs_dim(n)
             + (goal_dim(n) if self.goal_conditioned else 0)
             + (sysid_dim(n) if self._uses_sysid else 0)
+            + extra_obs_dim(n, self.cfg.action_history, self.cfg.obs_history)
         )
         self.state_dim = 2 + 2 * n
         p = self.cfg.physics
@@ -437,6 +490,8 @@ class NPendulumCartpole(gym.Env):
             highs += [1.0] * goal_dim(n)
         if self._uses_sysid:
             highs += [np.inf] * sysid_dim(n)
+        highs += [1.0] * self.cfg.action_history
+        highs += highs[: obs_dim(n)] * self.cfg.obs_history
         obs_high = np.array(highs, dtype=np.float32)
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
         self.action_space = spaces.Box(
@@ -453,11 +508,37 @@ class NPendulumCartpole(gym.Env):
         # The plant the dynamics integrate: nominal, or a per-episode draw.
         self._plant = self.cfg.physics
         self._force_gain = 1.0
+        if self.cfg.action_mode not in ("absolute", "delta"):
+            raise ValueError(
+                f"action_mode must be 'absolute' or 'delta', got {self.cfg.action_mode!r}"
+            )
+        if self.cfg.action_mode == "delta" and (
+            self.cfg.force_slew is None or self.cfg.action_history < 1
+        ):
+            raise ValueError(
+                "action_mode='delta' needs force_slew and action_history >= 1"
+            )
+        self.set_realism(self.cfg.realism)
         self._prev_energy_potential = 0.0  # energy-shaping potential (see RewardShape)
         # Encoder-style sensing state (see ``SensorModel``): last position reading
         # and the differenced (optionally filtered) velocity estimate.
         self._meas_prev: np.ndarray | None = None
         self._meas_vel = np.zeros(n + 1)
+        self._ekf: StateEKF | None = (
+            None  # built lazily when sensors.estimator == "ekf"
+        )
+        self._est_force = 0.0  # force the estimator believes was applied last step
+        # Observation extras: the sensed block of this step (cached so repeated
+        # calls within a step do not re-draw noise or advance the estimator), the
+        # last commanded forces, and the last sensed kinematic frames.
+        self._sensed: np.ndarray | None = None
+        self._extras = np.zeros(0, dtype=np.float32)
+        self._cmd_hist: collections.deque[float] = collections.deque(
+            [0.0] * self.cfg.action_history, maxlen=max(self.cfg.action_history, 1)
+        )
+        self._obs_hist: collections.deque[np.ndarray] = collections.deque(
+            maxlen=max(self.cfg.obs_history, 1)
+        )
 
         # Goal state. Non-conditioned mode keeps the all-upright target forever.
         self.goal_configs = goal_configs(n)
@@ -485,6 +566,35 @@ class NPendulumCartpole(gym.Env):
             )
         else:
             self._action_buf = None
+
+    def set_realism(self, realism: float) -> None:
+        """Set how strongly rail friction, sensor noise and randomization apply.
+
+        Sensor effects change immediately; the plant (friction / randomization)
+        changes at the next ``reset``. See ``EnvConfig.realism``.
+        """
+        r = float(np.clip(realism, 0.0, 1.0))
+        self._realism = r
+        cfg = self.cfg
+        p = cfg.physics
+        self._plant_base = (
+            p if r >= 1.0 else dataclasses.replace(p, cart_coulomb=p.cart_coulomb * r)
+        )
+        self._rnd = None if cfg.randomize is None else cfg.randomize.scaled(r)
+        hw = cfg.hardware
+        sensors = hw.sensors if hw is not None else None
+        self._sensors_eff = (
+            None
+            if sensors is None
+            else dataclasses.replace(
+                sensors,
+                x_noise_std=sensors.x_noise_std * r,
+                angle_noise_std=sensors.angle_noise_std * r,
+                x_resolution=sensors.x_resolution * r,
+                angle_resolution=sensors.angle_resolution * r,
+            )
+        )
+        self._obs_noise_scale = r
 
     def reset(
         self,
@@ -525,11 +635,17 @@ class NPendulumCartpole(gym.Env):
         self._settled = 0
         self._meas_prev = None
         self._meas_vel = np.zeros(n + 1)
+        self._est_force = 0.0
+        self._cmd_hist.clear()
+        self._cmd_hist.extend([0.0] * cfg.action_history)
+        self._obs_hist.clear()
 
-        if cfg.randomize is not None:
-            self._plant, self._force_gain = cfg.randomize.sample(
-                cfg.physics, n, self.np_random
+        if self._rnd is not None:
+            self._plant, self._force_gain = self._rnd.sample(
+                self._plant_base, n, self.np_random
             )
+        else:
+            self._plant, self._force_gain = self._plant_base, 1.0
         hw = self.cfg.hardware
         if hw is not None:
             if self._uses_sysid:
@@ -656,7 +772,7 @@ class NPendulumCartpole(gym.Env):
             self.transition_stats.record(self._seg_from, self._goal_idx, ok)
         frm = self._goal_idx if ok else FROM_OTHER
         self._begin_segment(goal_index(goal, self.n_links), frm)
-        return self._make_obs()
+        return self._make_obs(fresh=False)
 
     @property
     def settled(self) -> bool:
@@ -697,7 +813,22 @@ class NPendulumCartpole(gym.Env):
         buffer and the oldest buffered command is applied to the plant.
         """
         p = self.cfg.physics
-        raw_F = float(np.clip(action[0], -p.force_max, p.force_max))
+        if self.cfg.action_mode == "delta":
+            # The action is a fraction of the actuator's per-step rate limit; the
+            # commanded force is its integral, so it cannot jump (assert for mypy).
+            assert self.cfg.force_slew is not None
+            rate = float(np.clip(action[0] / p.force_max, -1.0, 1.0))
+            raw_F = float(
+                np.clip(
+                    self._prev_cmd + rate * self.cfg.force_slew * p.dt,
+                    -p.force_max,
+                    p.force_max,
+                )
+            )
+        else:
+            raw_F = float(np.clip(action[0], -p.force_max, p.force_max))
+        if self.cfg.action_history:
+            self._cmd_hist.appendleft(raw_F)
 
         if self._action_buf is not None:
             applied_F = float(self._action_buf[0])
@@ -716,6 +847,7 @@ class NPendulumCartpole(gym.Env):
         # Drive speed limit (back-EMF): what the motor can deliver at this speed.
         applied_F = available_force(applied_F, float(self._state[1]), p)
 
+        self._est_force = applied_F  # what the firmware believes it delivered
         self._state = step(self._state, applied_F * self._force_gain, self._plant)
         self._step_count += 1
 
@@ -733,7 +865,8 @@ class NPendulumCartpole(gym.Env):
         if self.goal_conditioned:
             info.update(self._goal_info())
             if self._advance_segment(terminated, truncated, info):
-                obs = self._make_obs()  # the next action should see the new goal
+                # The next action should see the new goal (same sensor reading).
+                obs = self._make_obs(fresh=False)
             # A hold-only episode is exactly one hold segment.
             truncated = truncated or (self.hold_only and "segment" in info)
         return obs, reward, terminated, truncated, info
@@ -771,14 +904,15 @@ class NPendulumCartpole(gym.Env):
         info["goal"] = self.goal
         return True
 
-    def _make_obs(self) -> np.ndarray:
-        """Build the observation: kinematics [+ goal] [+ sysID context].
+    def _sense(self) -> None:
+        """Take one sensor reading of the current state and cache it.
 
-        Sensor noise applies to measured quantities only, never to the goal
-        (a command, not a measurement).
+        Builds the kinematic block (exact, or from the encoder model), appends the
+        sysID context, applies the uniform observation noise, and updates the
+        observation-extras history. Call once per control step.
         """
         hw = self.cfg.hardware
-        sensors = hw.sensors if hw is not None else None
+        sensors = self._sensors_eff
         obs = encode_obs(
             self._state if sensors is None else self._measured_state(sensors)
         )
@@ -786,13 +920,47 @@ class NPendulumCartpole(gym.Env):
             obs = np.concatenate([obs, self._sysid_context])
         if hw is not None and hw.sensor_noise_std > 0.0:
             obs = obs + self.np_random.normal(
-                0.0, hw.sensor_noise_std, obs.shape
+                0.0, hw.sensor_noise_std * self._obs_noise_scale, obs.shape
             ).astype(np.float32)
+        self._sensed = obs
+
+        extras: list[np.ndarray] = []
+        if self.cfg.action_history:
+            extras.append(
+                np.array(self._cmd_hist, dtype=np.float32) / self.cfg.physics.force_max
+            )
+        if self.cfg.obs_history:
+            kin = obs[: obs_dim(self.n_links)]
+            if not self._obs_hist:  # first frame of an episode: no past yet
+                self._obs_hist.extend([kin] * self.cfg.obs_history)
+            extras.extend(list(self._obs_hist))
+            self._obs_hist.appendleft(kin)
+        self._extras = (
+            np.concatenate(extras).astype(np.float32)
+            if extras
+            else np.zeros(0, dtype=np.float32)
+        )
+
+    def _make_obs(self, fresh: bool = True) -> np.ndarray:
+        """Build the observation: kinematics [+ goal] [+ sysID] [+ history extras].
+
+        Sensor noise applies to measured quantities only, never to the goal
+        (a command, not a measurement). ``fresh=False`` reuses this step's sensor
+        reading (e.g. to re-issue the observation after a goal switch); a fresh
+        reading advances the velocity estimator and the history, so it is taken
+        exactly once per control step.
+        """
+        if fresh or self._sensed is None:
+            self._sense()
+        obs = self._sensed
+        assert obs is not None
         if self.goal_conditioned:
             k = obs_dim(self.n_links)
             goal_obs = np.cos(self._goal).astype(np.float32)
             obs = np.concatenate([obs[:k], goal_obs, obs[k:]])
-        return obs
+        if self._extras.size:
+            obs = np.concatenate([obs, self._extras])
+        return obs.astype(np.float32, copy=False)
 
     def _read(self, true_pos: np.ndarray, noise: np.ndarray, res: np.ndarray):
         """Noisy, quantized encoder readings of the positions ``true_pos``."""
@@ -812,6 +980,8 @@ class NPendulumCartpole(gym.Env):
         res = np.array([sensors.x_resolution] + [sensors.angle_resolution] * n)
         pos = np.concatenate(([self._state[0]], self._state[2::2]))
         meas = self._read(pos, noise, res)
+        if sensors.estimator == "ekf":
+            return self._ekf_state(sensors, meas, noise, res)
         if self._meas_prev is None:  # first reading after reset: rates unknown -> 0
             vel = np.zeros(n + 1)
         else:
@@ -823,6 +993,30 @@ class NPendulumCartpole(gym.Env):
         out[0], out[1] = meas[0], vel[0]
         out[2::2], out[3::2] = meas[1:], vel[1:]
         return out
+
+    def _ekf_state(
+        self, sensors, meas: np.ndarray, noise: np.ndarray, res: np.ndarray
+    ) -> np.ndarray:
+        """Controller-side state estimate from an EKF run on the encoder readings."""
+        if sensors.estimator != "ekf":
+            raise ValueError(f"unknown estimator {sensors.estimator!r}")
+        # Reading uncertainty = noise + quantization (uniform, res / sqrt(12)).
+        pos_std = np.sqrt(noise**2 + (res**2) / 12.0)
+        pos_std = np.maximum(pos_std, 1e-6)  # keep R invertible at realism 0
+        if self._ekf is None or self._meas_prev is None:
+            self._ekf = StateEKF(
+                self.cfg.physics,
+                self.n_links,
+                pos_std,
+                force_std=sensors.ekf_force_std,
+                accel_std=sensors.ekf_accel_std,
+            )
+            est = self._ekf.reset(meas)
+        else:
+            self._ekf.R = np.diag(pos_std**2)
+            est = self._ekf.update(self._est_force, meas)
+        self._meas_prev = meas  # marks the filter as initialised for this episode
+        return est
 
     def _angle_potential(self, state: np.ndarray) -> float:
         """Goal-alignment product over links, in [0, 1].
@@ -863,13 +1057,14 @@ class NPendulumCartpole(gym.Env):
         # Potential-based shaping (Ng et al. 1999): F(s,s') = g*P(s') - P(s), with
         # Φ = r_angle. Rewards progress toward the goal every step instead of
         # only on arrival, without changing the optimal policy.
-        shaping = self.SHAPING_GAMMA * r_angle - self._prev_potential
+        gamma = shaping_gamma(self.cfg.physics)
+        shaping = gamma * r_angle - self._prev_potential
         self._prev_potential = r_angle
 
         reward = base + self.SHAPING_WEIGHT * shaping
         if shape is not None and shape.energy_weight > 0.0:
             energy = self._energy_potential(state)
-            reward += self.SHAPING_GAMMA * energy - self._prev_energy_potential
+            reward += gamma * energy - self._prev_energy_potential
             self._prev_energy_potential = energy
         return float(reward)
 

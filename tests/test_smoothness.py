@@ -55,17 +55,17 @@ def test_smoothness_penalty_is_positive_and_trains_down(tmp_path: Path) -> None:
     np.random.seed(0)
     trainer = _trainer(tmp_path, smooth_temporal=5.0, smooth_spatial=5.0)
     obs, _, _, nxt, _ = trainer._sample_batch()
-    before = trainer._smoothness_loss(obs, nxt)
+    before = _loss(trainer, obs, nxt)
     assert before is not None and float(before.detach()) > 0.0
     opt = torch.optim.Adam(trainer.actor.parameters(), lr=1e-2)
     torch.manual_seed(0)
     for _ in range(150):
-        loss = trainer._smoothness_loss(obs, nxt)
+        loss = _loss(trainer, obs, nxt)
         assert loss is not None
         opt.zero_grad()
         loss.backward()
         opt.step()
-    after = trainer._smoothness_loss(obs, nxt)
+    after = _loss(trainer, obs, nxt)
     assert after is not None and float(after.detach()) < 0.2 * float(before.detach())
     assert trainer._update()["smooth_loss"] >= 0.0  # the full update still runs
 
@@ -85,7 +85,7 @@ def test_smooth_actor_has_lower_local_gain(tmp_path: Path) -> None:
     before = gain()
     opt = torch.optim.Adam(trainer.actor.parameters(), lr=1e-2)
     for _ in range(100):
-        loss = trainer._smoothness_loss(obs, obs)
+        loss = _loss(trainer, obs, obs)
         assert loss is not None
         opt.zero_grad()
         loss.backward()
@@ -129,6 +129,12 @@ def _raw_batch(trainer: TQCTrainer, states: np.ndarray, goal: str) -> None:
     trainer._raw_obs = torch.as_tensor(np.array(rows, dtype=np.float32))
 
 
+def _loss(trainer: TQCTrainer, obs: torch.Tensor, nxt: torch.Tensor) -> torch.Tensor:
+    loss = trainer._smoothness_loss(obs, nxt)
+    assert loss is not None
+    return loss
+
+
 def test_alignment_gate_is_one_at_goal_and_zero_far(tmp_path: Path) -> None:
     """The gate is the reward's alignment term: 1 at the goal, ~0 when opposite."""
     trainer = _trainer(tmp_path, smooth_temporal=1.0, smooth_gate_power=2.0)
@@ -136,12 +142,14 @@ def test_alignment_gate_is_one_at_goal_and_zero_far(tmp_path: Path) -> None:
     down = np.array([0.0, 0.0, np.pi, 0.0, np.pi, 0.0])
     _raw_batch(trainer, np.stack([up, down]), "UU")
     gate = trainer._alignment_gate()
+    assert isinstance(gate, torch.Tensor)
     assert float(gate[0]) == pytest.approx(1.0) and float(gate[1]) < 1e-6
     _raw_batch(trainer, np.stack([up, down]), "DD")  # the goal flips which is aligned
     gate = trainer._alignment_gate()
+    assert isinstance(gate, torch.Tensor)
     assert float(gate[0]) < 1e-6 and float(gate[1]) == pytest.approx(1.0)
     ungated = _trainer(tmp_path, smooth_temporal=1.0)
-    assert ungated._alignment_gate() == 1.0
+    assert float(ungated._alignment_gate()) == 1.0
 
 
 def test_gated_penalty_ignores_swing_up_states(tmp_path: Path) -> None:
@@ -150,15 +158,13 @@ def test_gated_penalty_ignores_swing_up_states(tmp_path: Path) -> None:
         tmp_path, smooth_temporal=5.0, smooth_spatial=5.0, smooth_gate_power=2.0
     )
     obs, _, _, nxt, _ = trainer._sample_batch()
-    full = float(
-        trainer._smoothness_loss(obs, nxt).detach()
-    )  # gate from the sampled batch
+    full = float(_loss(trainer, obs, nxt).detach())  # gate from the sampled batch
     _raw_batch(
         trainer, np.tile([0.0, 0.0, np.pi, 0.0, np.pi, 0.0], (obs.shape[0], 1)), "UU"
     )
-    far = float(trainer._smoothness_loss(obs, nxt).detach())
+    far = float(_loss(trainer, obs, nxt).detach())
     _raw_batch(trainer, np.zeros((obs.shape[0], 6)), "UU")
-    near = float(trainer._smoothness_loss(obs, nxt).detach())
+    near = float(_loss(trainer, obs, nxt).detach())
     assert far < 1e-6 < near
     assert full >= 0.0
 
@@ -170,9 +176,9 @@ def test_smoothness_ramp_schedule(tmp_path: Path) -> None:
     )
     obs, _, _, nxt, _ = trainer._sample_batch()
     trainer.step = 50
-    assert float(trainer._smoothness_loss(obs, nxt)) == 0.0
+    assert float(_loss(trainer, obs, nxt)) == 0.0
     trainer.step = 150
-    half = float(trainer._smoothness_loss(obs, nxt).detach())
+    half = float(_loss(trainer, obs, nxt).detach())
     trainer.step = 250
-    full = float(trainer._smoothness_loss(obs, nxt).detach())
+    full = float(_loss(trainer, obs, nxt).detach())
     assert full > 0.0 and half == pytest.approx(0.5 * full, rel=1e-4)
