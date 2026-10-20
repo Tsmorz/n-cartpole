@@ -44,10 +44,10 @@ def test_ekf_recovers_velocities_far_better_than_differencing() -> None:
     ekf = StateEKF(
         phys, n, np.sqrt(sigma**2 + res**2 / 12), force_std=0.5, accel_std=1.0
     )  # tight model assumption: here the filter's model IS the plant
-    est = [ekf.reset(meas[0])]
+    est_list = [ekf.reset(meas[0])]
     for k in range(len(forces)):
-        est.append(ekf.update(forces[k], meas[k + 1]))
-    est = np.array(est)
+        est_list.append(ekf.update(forces[k], meas[k + 1]))
+    est = np.array(est_list)
     diff_v = np.diff(meas, axis=0) / phys.dt
     vel_idx = [3, 5]  # link angular velocities in the state
     skip = 40  # let the filter settle

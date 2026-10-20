@@ -291,9 +291,11 @@ def test_goal_conditioned_delta_ekf_pipeline_end_to_end(tmp_path: Path) -> None:
         action_history=2,
         realism=0.0,
     )
-    sensors = dataclasses.replace(env_cfg.hardware.sensors, estimator="ekf")
+    hw = env_cfg.hardware
+    assert hw is not None and hw.sensors is not None
+    sensors = dataclasses.replace(hw.sensors, estimator="ekf")
     env_cfg = dataclasses.replace(
-        env_cfg, hardware=dataclasses.replace(env_cfg.hardware, sensors=sensors)
+        env_cfg, hardware=dataclasses.replace(hw, sensors=sensors)
     )
     cfg = TQCConfig(
         env=env_cfg,
@@ -315,7 +317,9 @@ def test_goal_conditioned_delta_ekf_pipeline_end_to_end(tmp_path: Path) -> None:
     bundle = load_policy(tmp_path / "tqc_latest.pt")
     assert bundle.goal_conditioned
     assert bundle.env_config.action_mode == "delta"
-    assert bundle.env_config.hardware.sensors.estimator == "ekf"
+    hw = bundle.env_config.hardware
+    assert hw is not None and hw.sensors is not None
+    assert hw.sensors.estimator == "ekf"
     stats, metrics = evaluate_transition_metrics(bundle, seconds=1.0, trials=1)
     assert stats.count[1:].sum() == 16  # every (start, goal) pair once
     assert np.all(metrics.peak_force() <= cfg.env.physics.force_max + 1e-6)
