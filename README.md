@@ -7,17 +7,9 @@
 
 TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionless track carries two pendulums in series; the policy learns to apply horizontal forces to swing both poles from hanging to upright and balance them there.
 
-<img src="docs/assets/tqc_swingup.gif" alt="TQC policy swinging up and balancing both poles" width="900" height="522">
+<a href="https://tsmorz.github.io/controls/swingup/"><img src="docs/assets/web_swingup.gif" alt="TQC policy running in the browser, swinging the double pendulum from hanging to upright (UU) in 4.4 s, with live cart position, link angle and force traces" width="640" height="576"></a>
 
-*A trained TQC policy swinging up and balancing both links upright, cart re-centered — return 774.4 over the episode.*
-
-## Try it in your browser
-
-The goal-conditioned policy runs live at [tsmorz.github.io/controls/swingup](https://tsmorz.github.io/controls/swingup/): drag the cart yourself, or pick a target pose (UU, UD, DU, DD) and let the network take it there. The actor and physics come from this repo via `task export-web`.
-
-<a href="https://tsmorz.github.io/controls/swingup/"><img src="docs/assets/web_swingup.gif" alt="In-browser TQC policy swinging the double pendulum from hanging to upright (UU) in 4.4 s, with live cart position, link angle and force traces" width="640" height="576"></a>
-
-*Recorded from the live page: Reset to hanging, then target UU. The browser actor reaches UU in 4.36 s and holds it.*
+*The goal-conditioned TQC policy running live in the browser at [tsmorz.github.io/controls/swingup](https://tsmorz.github.io/controls/swingup/): from hanging, target UU is reached in 4.36 s and held. On the page you can drag the cart yourself, or pick a target pose (UU, UD, DU, DD) and let the network take it there; the actor and physics are exported from this repo with `task export-web`.*
 
 ## Install
 
@@ -118,10 +110,6 @@ is labeled with one letter per link, base link first:
 | `DU` | down          | up           | no — actively balanced       |
 | `UD` | up            | down         | no — actively balanced       |
 | `DD` | down          | down         | yes — policy damps the swing |
-
-<img src="docs/assets/tqc_goal_transitions.gif" alt="Goal-conditioned TQC policy transitioning DD → UU → DU → UD → UU → DD" width="900">
-
-*One goal-conditioned network commanded through `UU@0, DU@6, UD@12, UU@18, DD@24` from the hanging-down start; every transition was reached.*
 
 That gives 12 transitions plus 4 "hold" cases, all learned by the same network.
 The target configuration is an extra input to the policy (±1 per link), and the
