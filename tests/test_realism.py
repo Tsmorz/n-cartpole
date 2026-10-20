@@ -142,12 +142,12 @@ def test_sensor_model_noise_quantization_and_differenced_velocity() -> None:
 
 def test_velocity_filter_smooths_differenced_rates() -> None:
     """The EMA filter reduces velocity noise (modestly: differenced noise is anti-correlated)."""
-    base = dict(angle_noise_std=5e-4)
     stds = []
     for alpha in (0.0, 0.8):
         cfg = EnvConfig(
             hardware=HardwareConfig(
-                sysid_context=False, sensors=SensorModel(velocity_filter=alpha, **base)
+                sysid_context=False,
+                sensors=SensorModel(velocity_filter=alpha, angle_noise_std=5e-4),
             ),
             max_steps=2000,
             init_random_prob=0.0,
