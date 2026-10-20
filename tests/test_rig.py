@@ -54,7 +54,7 @@ def test_rig_config_loads_and_is_physically_plausible() -> None:
     assert np.all(inertia < m * ln**2)  # below a point mass at the tip
     assert 0.5 <= p.M <= 3.0
     assert 5.0 <= p.force_max / p.M <= 40.0  # cart acceleration of a small belt drive
-    assert p.x_lim <= 0.5  # leaves room for carriage + bumpers on a 1 m rail
+    assert p.x_lim <= 0.6  # ~1.2 m rail: travel + carriage + bumper margins
     assert m.sum() < p.M  # light pendulums on a heavier cart
     assert np.all(np.linalg.eigvalsh(mass_matrix(np.array([0.3, -1.0]), p)) > 0)
     assert "link 1" in rig_summary(p, n)

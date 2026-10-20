@@ -70,6 +70,14 @@ class PolicyBundle:
                 raise ValueError("goal-conditioned policy: encode() needs a goal")
             target = goal_configs(self.n_links)[goal_index(goal, self.n_links)]
             cols += [np.full(len(s), np.cos(t)) for t in target]
+        # Observation extras cannot be known from a single state: assume the
+        # actuator was idle (zero past forces) and the state steady (past frames
+        # equal to the current one) — the quiescent case, which is what a policy
+        # map over states is meant to show.
+        cfg = self.env_config
+        kin_cols = cols[: 2 + 3 * self.n_links]
+        cols += [np.zeros(len(s))] * int(getattr(cfg, "action_history", 0))
+        cols += kin_cols * int(getattr(cfg, "obs_history", 0))
         return np.stack(cols, axis=1).astype(np.float32)
 
     def normalize(self, obs: np.ndarray) -> torch.Tensor:

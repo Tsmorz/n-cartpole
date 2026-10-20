@@ -143,36 +143,151 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smooth-temporal",
         type=float,
-        default=0.0,
+        default=None,
         help="CAPS temporal smoothness weight on the actor's action change between "
         "consecutive states (0 = off); suppresses high-frequency force dither",
     )
     parser.add_argument(
         "--smooth-spatial",
         type=float,
-        default=0.0,
+        default=None,
         help="CAPS spatial smoothness weight: action change under a small "
         "observation perturbation, i.e. a cap on the actor's local gain (0 = off)",
     )
     parser.add_argument(
         "--smooth-gate",
         type=float,
-        default=0.0,
+        default=None,
         help="Gate the smoothness penalty by closeness to the goal, alignment**N "
         "(0 = ungated). Quiet only when settled; swing-up stays aggressive.",
     )
     parser.add_argument(
         "--smooth-start",
         type=int,
-        default=0,
+        default=None,
         help="Env step at which the smoothness penalty starts ramping in",
     )
     parser.add_argument(
         "--smooth-ramp",
         type=int,
-        default=0,
+        default=None,
         help="Steps over which the smoothness penalty ramps from 0 to full weight "
         "(0 = immediate once started)",
+    )
+    parser.add_argument(
+        "--action-history",
+        type=int,
+        default=0,
+        help="Append the last N commanded forces to the observation (the command "
+        "in flight through the actuator delay/slew is not visible in the state)",
+    )
+    parser.add_argument(
+        "--obs-history",
+        type=int,
+        default=0,
+        help="Append the last N past measurement frames to the observation so the "
+        "policy can learn its own velocity filtering (no hand-set lag)",
+    )
+    parser.add_argument(
+        "--estimator",
+        choices=("diff", "ekf"),
+        default=None,
+        help="Where the velocities in the observation come from: finite-differenced "
+        "encoder readings (diff) or a model-based EKF (ekf; no filter lag). Overrides "
+        "the config's [hardware.sensors]; with --resume it changes the resumed run.",
+    )
+    parser.add_argument(
+        "--ekf-accel-std",
+        type=float,
+        default=None,
+        help="EKF trust in its model: unmodelled link acceleration (rad/s^2). Smaller "
+        "= smoother estimates, more reliance on the model (0.5 tested best zero-shot)",
+    )
+    parser.add_argument(
+        "--ekf-force-std",
+        type=float,
+        default=None,
+        help="EKF unmodelled cart force (N): rail friction, force-gain error",
+    )
+    parser.add_argument(
+        "--resume-lr",
+        type=float,
+        default=None,
+        help="With --resume, set the actor/critic learning rate (fine-tune gently)",
+    )
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=25_000,
+        help="Save a numbered checkpoint every N env steps (each is ~45 MB)",
+    )
+    parser.add_argument(
+        "--actor-warmup-steps",
+        type=int,
+        default=0,
+        help="Critic warm-up: freeze the actor (and temperature) for this many env "
+        "steps after a start/resume while the critic fits the new data",
+    )
+    parser.add_argument(
+        "--reset-buffer",
+        action="store_true",
+        help="With --resume, start with an empty replay buffer (its old transitions "
+        "came from a different observation pipeline)",
+    )
+    parser.add_argument(
+        "--force-slew",
+        type=float,
+        default=None,
+        help="Override the actuator slew limit (N/s). With --resume it changes the "
+        "limit of the resumed run (a diagnostic: the old replay data stays).",
+    )
+    parser.add_argument(
+        "--realism",
+        type=float,
+        default=None,
+        help="Start level in [0, 1] for rail friction, encoder noise/quantization and "
+        "plant randomization (0 = clean plant, 1 = as configured). Overrides the "
+        "config; with --resume it changes the level of the resumed run.",
+    )
+    parser.add_argument(
+        "--realism-ramp-start",
+        type=int,
+        default=0,
+        help="Env step at which realism starts ramping up to 1",
+    )
+    parser.add_argument(
+        "--realism-ramp-steps",
+        type=int,
+        default=0,
+        help="Steps over which realism ramps linearly to 1 (0 = no ramp)",
+    )
+    parser.add_argument(
+        "--action-mode",
+        choices=("absolute", "delta"),
+        default=None,
+        help="absolute: the action is the commanded force. delta: the action is the "
+        "force CHANGE within the actuator rate limit (smooth by construction; "
+        "needs --action-history >= 1)",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=None,
+        help="Discount factor (default 0.99 per 10 ms, rescaled for the control "
+        "period so the horizon in seconds is the same at 200 Hz)",
+    )
+    parser.add_argument(
+        "--explore-noise",
+        choices=("white", "pink"),
+        default="white",
+        help="Exploration noise color: white (independent per step) or pink "
+        "(1/f, temporally correlated within an episode)",
+    )
+    parser.add_argument(
+        "--explore-beta",
+        type=float,
+        default=1.0,
+        help="Spectral exponent of --explore-noise pink (1 = pink, 2 = red)",
     )
     parser.add_argument(
         "--smooth-sigma",
@@ -190,6 +305,29 @@ def parse_args() -> argparse.Namespace:
         "also restore the replay buffer.",
     )
     return parser.parse_args()
+
+
+def _with_sensor_overrides(env: EnvConfig, args: argparse.Namespace) -> EnvConfig:
+    """Apply --estimator / --ekf-* to ``env.hardware.sensors`` (no-op if none given)."""
+    fields = {
+        k: v
+        for k, v in (
+            ("estimator", args.estimator),
+            ("ekf_accel_std", args.ekf_accel_std),
+            ("ekf_force_std", args.ekf_force_std),
+        )
+        if v is not None
+    }
+    if not fields:
+        return env
+    if env.hardware is None or env.hardware.sensors is None:
+        raise SystemExit(
+            "--estimator/--ekf-* need a [hardware.sensors] model (use --config)"
+        )
+    sensors = dataclasses.replace(env.hardware.sensors, **fields)
+    return dataclasses.replace(
+        env, hardware=dataclasses.replace(env.hardware, sensors=sensors)
+    )
 
 
 def main() -> None:
@@ -216,6 +354,20 @@ def main() -> None:
     if overrides:
         shape = dataclasses.replace(base_env.reward_shape or RewardShape(), **overrides)
         base_env = dataclasses.replace(base_env, reward_shape=shape)
+    if args.resume is None:  # on resume the overrides apply to the checkpoint's env
+        base_env = _with_sensor_overrides(base_env, args)
+    if args.realism is not None:
+        base_env = dataclasses.replace(base_env, realism=args.realism)
+    if args.force_slew is not None:
+        base_env = dataclasses.replace(base_env, force_slew=args.force_slew)
+    if args.action_mode is not None:
+        base_env = dataclasses.replace(base_env, action_mode=args.action_mode)
+    if args.action_history or args.obs_history:
+        base_env = dataclasses.replace(
+            base_env,
+            action_history=args.action_history,
+            obs_history=args.obs_history,
+        )
     if args.randomize and base_env.randomize is None:
         base_env = dataclasses.replace(base_env, randomize=PlantRandomization())
     checkpoint_dir = (
@@ -227,7 +379,9 @@ def main() -> None:
             base_env,
             n_links=args.links,
             goal_conditioned=args.goals,
-            max_steps=args.max_steps or (3000 if args.goals else 1000),
+            # 10 s episodes (30 s with goals), whatever the control rate
+            max_steps=args.max_steps
+            or round((30.0 if args.goals else 10.0) / base_env.physics.dt),
             hold_prob=args.hold_prob,
         ),
         device=args.device,
@@ -240,12 +394,21 @@ def main() -> None:
         symmetry_augment=not args.no_symmetry,
         target_entropy=args.target_entropy,
         hold_phase_steps=args.hold_phase_steps,
-        smooth_temporal=args.smooth_temporal,
-        smooth_spatial=args.smooth_spatial,
+        smooth_temporal=args.smooth_temporal or 0.0,
+        smooth_spatial=args.smooth_spatial or 0.0,
         smooth_sigma=args.smooth_sigma,
-        smooth_gate_power=args.smooth_gate,
-        smooth_start_step=args.smooth_start,
-        smooth_ramp_steps=args.smooth_ramp,
+        realism_ramp_start=args.realism_ramp_start,
+        realism_ramp_steps=args.realism_ramp_steps,
+        actor_warmup_steps=args.actor_warmup_steps,
+        checkpoint_every=args.checkpoint_every,
+        gamma=args.gamma
+        if args.gamma is not None
+        else 0.99 ** (base_env.physics.dt / 0.01),
+        explore_noise=args.explore_noise,
+        explore_beta=args.explore_beta,
+        smooth_gate_power=args.smooth_gate or 0.0,
+        smooth_start_step=args.smooth_start or 0,
+        smooth_ramp_steps=args.smooth_ramp or 0,
         total_steps=args.steps,
         checkpoint_dir=checkpoint_dir,
     )
@@ -283,9 +446,47 @@ def main() -> None:
             total_steps=args.steps,
             checkpoint_dir=args.checkpoint_dir or args.resume.parent,
         )
+        if args.realism is not None:  # fine-tune the same policy at a new level
+            cfg = dataclasses.replace(
+                cfg, env=dataclasses.replace(cfg.env, realism=args.realism)
+            )
+        if args.force_slew is not None:
+            cfg = dataclasses.replace(
+                cfg, env=dataclasses.replace(cfg.env, force_slew=args.force_slew)
+            )
+        cfg = dataclasses.replace(cfg, env=_with_sensor_overrides(cfg.env, args))
+        overrides = {
+            k: v
+            for k, v in (
+                ("smooth_temporal", args.smooth_temporal),
+                ("smooth_spatial", args.smooth_spatial),
+                ("smooth_gate_power", args.smooth_gate),
+                ("smooth_start_step", args.smooth_start),
+                ("smooth_ramp_steps", args.smooth_ramp),
+            )
+            if v is not None
+        }
+        if overrides:  # e.g. --smooth-temporal 0 --smooth-spatial 0 turns it off
+            cfg = dataclasses.replace(cfg, **overrides)
+        if args.actor_warmup_steps:
+            cfg = dataclasses.replace(cfg, actor_warmup_steps=args.actor_warmup_steps)
+        if args.realism_ramp_steps:
+            cfg = dataclasses.replace(
+                cfg,
+                realism_ramp_start=args.realism_ramp_start,
+                realism_ramp_steps=args.realism_ramp_steps,
+            )
     trainer = TQCTrainer(cfg)
     if args.resume is not None:
         trainer.load(args.resume)
+        if args.reset_buffer:
+            trainer.buffer.clear()
+            logger.info("Replay buffer cleared; learning resumes once it refills")
+        if args.resume_lr is not None:
+            for opt in (trainer.actor_opt, trainer.critic_opt):
+                for group in opt.param_groups:
+                    group["lr"] = args.resume_lr
+            logger.info(f"Learning rate set to {args.resume_lr:g}")
     if args.init_from is not None:
         trainer.warm_start(args.init_from)
     seed_steps = args.seed_steps

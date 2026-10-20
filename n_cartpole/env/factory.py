@@ -12,6 +12,7 @@ import numpy as np
 from n_cartpole.env.cartpole import (
     EnvConfig,
     NPendulumCartpole,
+    extra_obs_dim,
     goal_dim,
     obs_dim,
     obs_mirror_sign,
@@ -37,12 +38,21 @@ def env_spec(config: EnvConfig) -> tuple[int, np.ndarray]:
     with_sysid = config.hardware is not None and config.hardware.sysid_context
     # getattr: configs pickled in checkpoints before goal conditioning existed.
     with_goal = bool(getattr(config, "goal_conditioned", False))
+    a_hist = int(getattr(config, "action_history", 0))
+    o_hist = int(getattr(config, "obs_history", 0))
     dim = (
         obs_dim(n)
         + (goal_dim(n) if with_goal else 0)
         + (sysid_dim(n) if with_sysid else 0)
+        + extra_obs_dim(n, a_hist, o_hist)
     )
-    sign = obs_mirror_sign(n, with_sysid=with_sysid, with_goal=with_goal)
+    sign = obs_mirror_sign(
+        n,
+        with_sysid=with_sysid,
+        with_goal=with_goal,
+        action_history=a_hist,
+        obs_history=o_hist,
+    )
     return dim, sign
 
 
