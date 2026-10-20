@@ -11,6 +11,14 @@ TQC policy learning for double pendulum cartpole swing-up. A cart on a frictionl
 
 *A trained TQC policy swinging up and balancing both links upright, cart re-centered — return 774.4 over the episode.*
 
+## Try it in your browser
+
+The goal-conditioned policy runs live at [tsmorz.github.io/controls/swingup](https://tsmorz.github.io/controls/swingup/): drag the cart yourself, or pick a target pose (UU, UD, DU, DD) and let the network take it there. The actor and physics come from this repo via `task export-web`.
+
+<a href="https://tsmorz.github.io/controls/swingup/"><img src="docs/assets/web_swingup.gif" alt="In-browser TQC policy swinging the double pendulum from hanging to upright (UU) in 4.4 s, with live cart position, link angle and force traces" width="640" height="576"></a>
+
+*Recorded from the live page: Reset to hanging, then target UU. The browser actor reaches UU in 4.36 s and holds it.*
+
 ## Install
 
 ```bash
