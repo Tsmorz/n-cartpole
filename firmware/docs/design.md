@@ -83,6 +83,12 @@ Rules:
   after going off the rail.
 - `MAINT`: an upload is writing flash.
 
+Arming the rig is refused (409, with the reason) while: no model, MAINT, the e-stop is
+pressed, the cart is off the rail, the model is not 2-link, the loop is over budget,
+encoder reads are failing, or a **zero reference is not set** (angles or cart: neither
+restored from NVS at boot nor zeroed since). The task counts faults (`fault_count`, the
+last one and its tick), so the status keeps a fault's history after it is cleared.
+
 Modes (independent of arming): `ai` (the policy drives to the goal; the cart slider sets
 `x_ref`, the point the AI balances around) and `manual` (a PD loop drives the cart to
 the slider position, capped at 10 N; to jog the rig or perturb the pendulum).
@@ -103,6 +109,18 @@ Backends (Kconfig `NCP_BACKEND_SIM` / `NCP_BACKEND_RIG`, default sim):
 All JSON responses carry `Content-Type: application/json`. Errors: HTTP 4xx/5xx with
 `{"ok": false, "error": "<reason>"}`.
 
+**Cross-site guard** (`web_post_guard` in `web.c`): every POST must carry
+`Content-Type: application/json` (`application/octet-stream` for `/api/model` and
+`/api/ota`), and a browser's `Origin` header, when present, must name the `Host` it was
+sent to; otherwise 403. Without it, any web page open on a computer on the same network
+could make the browser send a "simple" cross-origin POST (`text/plain` or form data, no
+preflight) such as `{"arm": true}` to `cartpole.local`. Requiring a non-simple content type
+forces a CORS preflight, which this server never answers with permission. Body-less
+endpoints (`/api/reboot`, `/api/wifi/forget`) take `{}`. GETs stay open (`/api/info`,
+`/api/status` and `/api/events` send `Access-Control-Allow-Origin: *` for tools). Not
+covered: DNS rebinding (a page whose own host name resolves to the device) and anyone
+who can reach the device directly; there is no password, so keep it on a trusted network.
+
 | method | path | body / response |
 |---|---|---|
 | GET | `/` `/app.js` `/style.css` | the dashboard |
@@ -114,6 +132,9 @@ All JSON responses carry `Content-Type: application/json`. Errors: HTTP 4xx/5xx 
 | POST | `/api/ota` | raw app image (`n-cartpole-fw-<ver>.bin`); first byte 0xE9; app descriptor project name must be `n_cartpole_fw` → `{"ok": true, "version": "..."}`, then reboots after 1 s; 409 if armed |
 | POST | `/api/wifi` | `{"ssid": "...", "password": "..."}` → `{"ok": true}` at once; the join runs in the background (see below), no reboot; 409 if armed, still starting or a join is running |
 | POST | `/api/reboot` | → `{"ok": true}`, reboots after 0.5 s |
+| GET | `/api/events` | the event log (below) |
+| POST | `/api/wifi/forget` | → `{"ok": true}`, stores an empty SSID (so the Kconfig default is not used either) and reboots into the setup access point; 409 if armed |
+| POST | `/api/hostname` | `{"hostname": "bench"}` (1–32 of `a-z0-9-`, not starting/ending with `-`) → `{"ok": true, "hostname": "bench"}`; saved to NVS and applied to mDNS at once; 409 if armed |
 
 Joining a network (`POST /api/wifi`, `net_join_start` in `net.c`): a `wifi_join` task on core 0
 sets the station config and connects, waiting up to 20 s for an IP. From the setup access point
@@ -149,6 +170,7 @@ Commands (`POST /api/cmd`, one key per request):
   "ota": {"running": "ota_0", "next": "ota_1", "state": "valid"},
   "backend": "sim",
   "hostname": "cartpole",
+  "boot": 42, "reset_reason": "power-on" | "crash (panic)" | "brownout (supply dipped)" | ...,
   "telemetry": {"version": 1, "frame_size": 232, "rate_hz": 50},
   "model": null | {
     "label": "...", "step": 2000000, "n_links": 2, "obs_dim": 12, "hidden": 256,
@@ -174,7 +196,15 @@ Status (WS text message and `/api/status`):
   "heap": {"internal_free": 180000, "internal_min": 150000, "psram_free": 3800000},
   "wifi": {"mode": "sta" | "ap", "ssid": "...", "ip": "192.168.1.40", "rssi": -52,
            "join": {"state": "idle" | "connecting" | "ok" | "failed", "ssid": "...", "ip": "...", "error": "..."}},
-  "uptime_s": 1234,
+  "uptime_s": 1234, "boot": 42, "events_seq": 17,
+  "faults": {"count": 2, "last": "e-stop", "ago_s": 81.5},
+  "io": {"rig": false}
+      | {"rig": true, "estop": false, "drive": false, "duty": 0.0, "dir": 1, "cart_count": -88,
+         "read_errors": 0,
+         "enc": [{"raw": 8170, "bad": 0, "agc": 72, "ocf": true, "cof": false,
+                  "comp_low": false, "comp_high": false}, {...}]},
+  "calib": {"angles": true, "cart": true, "off1": 2.81734, "off2": -0.41263, "angles_boot": 40,
+            "x_zero": 0.01275, "cart_boot": 40},          // rig only
   "cores": [{"id": 0, "load": 12.5}, {"id": 1, "load": 31.0}],
   "tasks": [{"name": "ctrl", "core": 1, "prio": 22, "cpu": 30.9, "stack_free": 2100}, ...]
 }
@@ -183,17 +213,51 @@ Status (WS text message and `/api/status`):
 `core` is the task's affinity (`-1` = either core); `cpu` is its share of one core
 since the previous status message (FreeRTOS run-time stats).
 
+`io` (rig): `enc[0]` is joint 1, `enc[1]` joint 2 (φ, relative to link 1). `raw` is the
+last good 14-bit angle and `bad` the bad reads since boot (SPI error, parity, error flag);
+`read_errors` counts consecutive ones (the encoder fault trips at
+`NCP_ENC_ERROR_LIMIT`). The AS5048A diagnostics register (0x3FFD) is read once a second
+per encoder (absent until the first good read): `agc` 0 = strong .. 255 = weak field,
+`comp_high` = field too weak (magnet too far), `comp_low` = too strong (too close), `cof` =
+CORDIC overflow, `ocf` = offset compensation finished (should be true). `duty` (0–1) and
+`dir` are the PWM command, `drive` the EN line. `calib.*_boot` is the boot (NVS boot
+counter) on which each zero reference was set.
+
+`events_seq` counts the event-log entries; a page fetches `/api/events` when it moves:
+
+```json
+{"seq": 17, "boot": 43, "uptime_ms": 81234,
+ "events": [{"seq": 1, "boot": 42, "t_ms": 412, "level": "info", "msg": "boot #42: v0.2.0, rig backend, reset: power-on"},
+            {"seq": 9, "boot": 42, "t_ms": 60120, "level": "error", "msg": "FAULT: e-stop"},
+            {"seq": 10, "boot": 43, "t_ms": 380, "level": "error", "msg": "boot #43: v0.2.0, rig backend, reset: task watchdog"}, ...]}
+```
+
+The log (`main/events.c`, core 0) keeps the latest 40 entries in RTC memory that a reset
+does not clear (`RTC_NOINIT_ATTR`, ~3.7 KB), so the entries before a crash, a watchdog
+reset, a brownout or a reboot are still there afterwards; `t_ms` counts from the boot that
+logged the entry (`boot`). Each entry has its own CRC (one half-written when the chip went
+down is dropped, not the log), and a power-on reset starts it empty. It holds the boot line
+with the reset reason, arming / disarming / faults / mode and model
+changes and loop-budget changes (the `tlm` task turns changes in the control task's status
+into entries; deadline misses while armed are summed, one entry per 10 s at most), model
+and firmware uploads, Wi-Fi joins, hostname changes, zeroing and reboots.
+
 ## Wi-Fi
 
 Station mode with credentials from NVS (or Kconfig defaults). If none are set, or the
 network is not found within 15 s, the device starts its own access point
 `cartpole-XXXX` (open, 192.168.4.1) so the dashboard is reachable for setup. mDNS
-advertises `<hostname>.local` (default `cartpole`).
+advertises `<hostname>.local` (default `cartpole`; changed from the dashboard with
+`POST /api/hostname`, live). `POST /api/wifi/forget` erases the network and reboots into the
+access point. Wi-Fi power save is off
+(`WIFI_PS_NONE`): modem sleep makes the radio miss multicast queries, so the `.local` name
+resolved only intermittently, and it adds latency jitter to the telemetry stream.
 
 ## Updates
 
-- **First flash (USB):** `task fw-flash -- <port>` writes the merged factory image
-  (bootloader + partition table + app) from a release or a local build.
+- **USB flash:** `task fw-flash -- <port>` writes the merged factory image
+  (bootloader + partition table + app) from a release or a local build, around the NVS
+  partition so the saved Wi-Fi network survives (`--erase-settings` to forget it).
 - **Firmware OTA:** drop `n-cartpole-fw-<version>.bin` from the GitHub release onto
   the dashboard. Two app slots (`ota_0`, `ota_1`) with rollback: a new image boots
   `pending`, marks itself valid after 10 s of healthy running (control loop ticking,

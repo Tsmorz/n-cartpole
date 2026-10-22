@@ -5,6 +5,7 @@
 
 #include "control.h"
 #include "esp_app_desc.h"
+#include "events.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -31,33 +32,42 @@ void app_main(void) {
 
     ESP_ERROR_CHECK(settings_init());
     const settings_t *cfg = settings_get();
+    events_init(cfg->boot_count);
+    {
+        esp_reset_reason_t r = esp_reset_reason();
+        bool bad = r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT ||
+                   r == ESP_RST_WDT || r == ESP_RST_BROWNOUT;
+        events_add(bad ? EV_ERROR : EV_INFO, "boot #%lu: v%s, %s backend, reset: %s",
+                   (unsigned long)cfg->boot_count, app->version, HAL_BACKEND_NAME, events_reset_reason());
+    }
 
     const model_t *model = NULL;
     if (model_store_init() == ESP_OK) {
         model = model_store_load();
     }
     if (model == NULL) {
-        ESP_LOGW(TAG, "no model (%s): the controller idles until one is uploaded",
-                 model_store_error());
+        events_add(EV_WARN, "no model (%s): the controller idles until one is uploaded",
+                   model_store_error());
     }
 
     esp_err_t herr = ncp_hal_init();
     if (herr != ESP_OK) {
-        ESP_LOGE(TAG, "plant hardware init failed (%s): arming will be refused / fault",
-                 esp_err_to_name(herr));
+        events_add(EV_ERROR, "plant hardware init failed (%s): arming will be refused",
+                   esp_err_to_name(herr));
     }
 #if !HAL_IS_SIM
     if (cfg->have_angle_offsets) {
         ncp_hal_rig_set_angle_offsets(cfg->angle_off1, cfg->angle_off2);
     } else {
-        ESP_LOGW(TAG, "rig angles not zeroed yet: hang the links at rest and send {\"zero\":\"angles\"}");
+        events_add(EV_WARN, "rig angles not zeroed: hang the links at rest and Zero angles");
     }
     if (cfg->have_cart_zero) {
         ncp_hal_rig_set_cart_zero(cfg->x_zero);
     } else {
-        ESP_LOGW(TAG, "cart position not zeroed yet: centre it and send {\"zero\":\"cart\"}");
+        events_add(EV_WARN, "cart not zeroed: centre it and Zero cart");
     }
 #endif
+    control_set_calibration(cfg->have_angle_offsets, cfg->have_cart_zero);
 
     ESP_ERROR_CHECK(control_start(model));
     ESP_ERROR_CHECK(net_start(cfg->hostname, cfg->ssid, cfg->password));

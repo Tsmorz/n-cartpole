@@ -46,6 +46,8 @@ void ncp_hal_apply(bool armed, double force) {
 
 bool ncp_hal_estop(void) { return false; }
 
+void ncp_hal_io(ncp_hal_io_t *out) { memset(out, 0, sizeof(*out)); }
+
 bool ncp_hal_off_rail(const double *pos, double x_lim) {
     (void)pos;
     (void)x_lim;

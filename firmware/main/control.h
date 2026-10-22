@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "hal.h"
 #include "model_store.h"
 #include "ncp_ctrl.h"      /* ncp_mode_t */
 #include "ncp_excite.h"
@@ -69,7 +70,17 @@ typedef struct {
     bool excite_active;
     float excite_t;       /* s since the excitation started */
     float dt;             /* control period of the model (s), default without one */
+    /* Faults since boot: how many, the latest and when (tick). */
+    uint32_t fault_count;
+    uint8_t last_fault;   /* ctrl_fault_t */
+    uint32_t last_fault_tick;
+    /* Rig zero references set (stored at boot, or zeroed since): arming needs both. */
+    bool cal_angles, cal_cart;
+    ncp_hal_io_t io;      /* sensors and drive */
 } ctrl_status_t;
+
+/* Before control_start: whether the rig's zero references were restored from NVS. */
+void control_set_calibration(bool angles, bool cart);
 
 /* Create the control task pinned to core 1; it starts with `model` (may be NULL). */
 esp_err_t control_start(const model_t *model);

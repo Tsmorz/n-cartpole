@@ -94,6 +94,13 @@ tasks:
         docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v5.3.1
         sh -c 'idf.py build && cd build && esptool.py --chip esp32s3 merge_bin -o factory.bin @flash_args'
 
+  fw-build-rig:
+    desc: "Build the rig backend (sdkconfig.rig over the defaults) in the ESP-IDF Docker image -> firmware/build-rig/"
+    cmds:
+      - >-
+        docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v5.3.1
+        sh -c 'idf.py -B build-rig -D SDKCONFIG=build-rig/sdkconfig -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.rig" build && cd build-rig && esptool.py --chip esp32s3 merge_bin -o factory.bin @flash_args'
+
   fw-flash:
     desc: "Flash a merged factory image over USB, keeping the saved Wi-Fi network (NVS); args: task fw-flash -- <port> [image] [--erase-settings] (default firmware/build/factory.bin)"
     cmds:

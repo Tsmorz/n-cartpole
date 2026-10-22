@@ -12,6 +12,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "events.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "web.h"
@@ -73,6 +74,10 @@ static int recv_full(httpd_req_t *req, char *buf, size_t len) {
 }
 
 esp_err_t ota_upload_handler(httpd_req_t *req) {
+    const char *guard = web_post_guard(req, "application/octet-stream");
+    if (guard != NULL) {
+        return web_send_forbidden(req, guard);
+    }
     ctrl_status_t st;
     control_get_status(&st);
     if (st.run == NCP_RUN_ARMED) {
@@ -161,7 +166,8 @@ esp_err_t ota_upload_handler(httpd_req_t *req) {
         err = esp_ota_set_boot_partition(part);
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "update failed: %s (%s)", why != NULL ? why : "flash error", esp_err_to_name(err));
+        events_add(EV_ERROR, "firmware update failed: %s (%s)", why != NULL ? why : "flash error",
+                   esp_err_to_name(err));
         maint.i = 0;
         control_send(&maint);
         return reply(req, "400 Bad Request", false, "error", why != NULL ? why : esp_err_to_name(err));
@@ -170,7 +176,7 @@ esp_err_t ota_upload_handler(httpd_req_t *req) {
     char version[sizeof(desc.version) + 1];
     memcpy(version, desc.version, sizeof(desc.version));
     version[sizeof(desc.version)] = '\0';
-    ESP_LOGI(TAG, "update %s written to %s; rebooting", version, part->label);
+    events_add(EV_INFO, "firmware %s written to %s; rebooting", version, part->label);
     reply(req, "200 OK", true, "version", version);
     ota_reboot_later(1000); /* stays in MAINT until the reboot */
     return ESP_OK;
@@ -203,7 +209,7 @@ void ota_confirm_or_rollback(void) {
         state != ESP_OTA_IMG_PENDING_VERIFY) {
         return;
     }
-    ESP_LOGW(TAG, "new firmware pending verification: checking health for 10 s");
+    events_add(EV_WARN, "new firmware pending: it is kept if it runs healthy for 10 s");
     const int64_t until = 10 * 1000000LL;
     while (esp_timer_get_time() < until) {
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -213,7 +219,7 @@ void ota_confirm_or_rollback(void) {
     bool ticking = control_ticks() > t0;
     if (ticking && web_running()) {
         esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGI(TAG, "firmware marked valid");
+        events_add(EV_INFO, "new firmware marked valid");
     } else {
         ESP_LOGE(TAG, "unhealthy (control loop %s, http %s): rolling back",
                  ticking ? "ok" : "stalled", web_running() ? "ok" : "down");

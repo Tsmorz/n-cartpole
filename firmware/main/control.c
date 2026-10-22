@@ -64,6 +64,9 @@ static bool s_timed;   /* a full timing window has been measured for this model 
 static ncp_excite_t s_exc;
 static bool s_exc_on, s_exc_from_rec;
 static double s_ext; /* excitation force of this tick (N) */
+static uint32_t s_fault_count, s_last_fault_tick;
+static uint8_t s_last_fault = CTRL_FAULT_NONE;
+static bool s_cal_angles = HAL_IS_SIM, s_cal_cart = HAL_IS_SIM; /* set before the task starts */
 
 /* timing window */
 static uint32_t s_w_n, s_w_max, s_misses;
@@ -160,6 +163,12 @@ static void publish(void) {
     p->excite_active = s_exc_on && s_exc.active;
     p->excite_t = s_exc_on ? (float)s_exc.t : 0.0f;
     p->dt = (float)period_s();
+    p->fault_count = s_fault_count;
+    p->last_fault = s_last_fault;
+    p->last_fault_tick = s_last_fault_tick;
+    p->cal_angles = s_cal_angles;
+    p->cal_cart = s_cal_cart;
+    ncp_hal_io(&p->io);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     s_seq = seq + 1; /* even: stable */
 }
@@ -220,7 +229,7 @@ static bool can_arm(void) {
     }
 #if !HAL_IS_SIM
     if (s_model->hdr.n_links != 2 || !s_timed || s_exec_avg > (uint32_t)(BUDGET * s_nominal_us) ||
-        ncp_hal_read_errors() > 0) {
+        ncp_hal_read_errors() > 0 || !s_cal_angles || !s_cal_cart) {
         return false;
     }
 #endif
@@ -230,6 +239,9 @@ static bool can_arm(void) {
 static void trip(ctrl_fault_t f) {
     s_run = NCP_RUN_FAULT;
     s_fault = (uint8_t)f;
+    s_fault_count++;
+    s_last_fault = (uint8_t)f;
+    s_last_fault_tick = s_tick;
 }
 
 static void rec_stop(void) {
@@ -352,6 +364,7 @@ static void handle(const ctrl_cmd_t *c) {
     case CTRL_CMD_ZERO_ANGLES:
         if (!HAL_IS_SIM && s_run != NCP_RUN_ARMED) {
             ncp_hal_rig_zero_angles(&s_zero_off1, &s_zero_off2);
+            s_cal_angles = true;
             if (s_model != NULL) {
                 ncp_ctrl_reset(&s_ctrl);
             }
@@ -362,6 +375,7 @@ static void handle(const ctrl_cmd_t *c) {
     case CTRL_CMD_ZERO_CART:
         if (!HAL_IS_SIM && s_run != NCP_RUN_ARMED) {
             ncp_hal_rig_zero_cart(&s_zero_x);
+            s_cal_cart = true;
             if (s_model != NULL) {
                 ncp_ctrl_reset(&s_ctrl);
             }
@@ -665,6 +679,11 @@ static void control_task(void *arg) {
 
 /* ---------- core 0 interface ---------- */
 
+void control_set_calibration(bool angles, bool cart) {
+    s_cal_angles = HAL_IS_SIM || angles;
+    s_cal_cart = HAL_IS_SIM || cart;
+}
+
 esp_err_t control_start(const model_t *model) {
     s_initial = model;
     s_ack_model = NULL;
@@ -725,6 +744,10 @@ const char *control_arm_refusal(const ctrl_status_t *st) {
     }
     if (st->read_errors > 0) {
         return "encoder read errors";
+    }
+    if (!st->cal_angles || !st->cal_cart) {
+        return !st->cal_angles ? "angles not zeroed: hang the links at rest and Zero angles"
+                               : "cart not zeroed: centre it and Zero cart";
     }
 #endif
     return NULL;

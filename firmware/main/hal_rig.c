@@ -35,6 +35,8 @@ static const char *TAG = "rig";
 #define AS5048_CMD_READ_ANGLE 0xFFFF /* read 0x3FFF, R = 1, even parity */
 #define AS5048_CMD_CLEAR_ERROR 0x4001 /* read 0x0001 (clears the error flag) */
 #define AS5048_CMD_NOP 0x0000
+#define AS5048_CMD_READ_DIAG 0x7FFD /* read 0x3FFD (diagnostics + AGC), R = 1, even parity */
+#define DIAG_EVERY 100 /* reads between diagnostics (alternating encoders): 1 s each at 200 Hz */
 #define AS5048_EF 0x4000
 
 #if CONFIG_NCP_ENC1_REVERSED
@@ -61,6 +63,9 @@ typedef struct {
     bool have;      /* first good reading taken */
     uint16_t last;  /* last raw angle */
     int32_t acc;    /* unwrapped counts */
+    uint32_t bad;   /* bad reads since boot */
+    bool diag;      /* diagnostics read at least once */
+    uint16_t diag_word; /* the last good diagnostics register (14 bits) */
 } enc_t;
 
 static enc_t s_enc[2];
@@ -70,6 +75,8 @@ static bool s_normalized; /* first reading wrapped into [-pi, pi) */
 static uint32_t s_errors;
 static bool s_hw_ok; /* ncp_hal_init succeeded: never touch half-initialized drivers from core 1 */
 static double s_last[3]; /* last good [x, th1, th2] */
+static int32_t s_cart_count;
+static int s_diag_wait, s_diag_next;
 
 /* ---------- force drive ----------
  * The actuator sits behind this small interface so a CAN/UART FOC driver (torque
@@ -185,16 +192,30 @@ static bool enc_read(enc_t *e, uint16_t *angle) {
     uint16_t r;
     if (enc_xfer(e->dev, AS5048_CMD_READ_ANGLE, &r) != ESP_OK ||
         enc_xfer(e->dev, AS5048_CMD_NOP, &r) != ESP_OK) {
+        e->bad++;
         return false;
     }
     if (__builtin_parity(r) != 0 || (r & AS5048_EF) != 0) {
         uint16_t dummy;
         enc_xfer(e->dev, AS5048_CMD_CLEAR_ERROR, &dummy);
         enc_xfer(e->dev, AS5048_CMD_NOP, &dummy);
+        e->bad++;
         return false;
     }
     *angle = (uint16_t)(r & 0x3FFF);
     return true;
+}
+
+/* The diagnostics register; a bad frame just leaves the previous value. */
+static void enc_read_diag(enc_t *e) {
+    uint16_t r;
+    if (enc_xfer(e->dev, AS5048_CMD_READ_DIAG, &r) != ESP_OK ||
+        enc_xfer(e->dev, AS5048_CMD_NOP, &r) != ESP_OK || __builtin_parity(r) != 0 ||
+        (r & AS5048_EF) != 0) {
+        return;
+    }
+    e->diag_word = (uint16_t)(r & 0x3FFF);
+    e->diag = true;
 }
 
 static void enc_unwrap(enc_t *e, uint16_t raw) {
@@ -290,6 +311,7 @@ static esp_err_t cart_init(void) {
 static double cart_x_raw(void) {
     int count = 0;
     pcnt_unit_get_count(s_pcnt, &count);
+    s_cart_count = count;
     return CART_SIGN * count * CART_M_PER_COUNT;
 }
 
@@ -331,6 +353,11 @@ bool ncp_hal_read(double *pos) {
     bool ok1 = enc_read(&s_enc[0], &raw1);
     bool ok2 = enc_read(&s_enc[1], &raw2);
     double x = cart_x_raw() - s_x_zero;
+    if (++s_diag_wait >= DIAG_EVERY) {
+        s_diag_wait = 0;
+        enc_read_diag(&s_enc[s_diag_next]);
+        s_diag_next ^= 1;
+    }
     if (!(ok1 && ok2)) {
         s_errors++;
         s_last[0] = x;
@@ -374,6 +401,32 @@ bool ncp_hal_estop(void) {
 #else
     return false;
 #endif
+}
+
+void ncp_hal_io(ncp_hal_io_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->rig = true;
+    out->estop = ncp_hal_estop();
+    out->drive_on = s_drive_on;
+    out->duty = s_duty == UINT32_MAX ? 0.0f : (float)s_duty / (float)PWM_MAX_DUTY;
+#if CONFIG_NCP_DIR_REVERSED
+    out->dir = s_dir == 0 ? 1 : -1;
+#else
+    out->dir = s_dir == 1 ? 1 : -1;
+#endif
+    out->cart_count = s_cart_count;
+    out->read_errors = s_errors;
+    for (int i = 0; i < 2; i++) {
+        const enc_t *e = &s_enc[i];
+        out->enc[i].raw = e->last;
+        out->enc[i].bad = e->bad;
+        out->enc[i].diag = e->diag;
+        out->enc[i].agc = (uint8_t)(e->diag_word & 0xFF);
+        out->enc[i].ocf = (e->diag_word >> 8) & 1;
+        out->enc[i].cof = (e->diag_word >> 9) & 1;
+        out->enc[i].comp_low = (e->diag_word >> 10) & 1;
+        out->enc[i].comp_high = (e->diag_word >> 11) & 1;
+    }
 }
 
 bool ncp_hal_off_rail(const double *pos, double x_lim) { return fabs(pos[0]) > x_lim; }

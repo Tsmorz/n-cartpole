@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -16,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_psram.h"
+#include "events.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal.h"
@@ -111,6 +113,40 @@ static cJSON *read_json(httpd_req_t *req, const char **why) {
     return j;
 }
 
+/* ---------- cross-site request guard ---------- */
+
+const char *web_post_guard(httpd_req_t *req, const char *content_type) {
+    char v[96];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", v, sizeof(v)) != ESP_OK ||
+        strncasecmp(v, content_type, strlen(content_type)) != 0) {
+        return strcmp(content_type, "application/json") == 0
+                   ? "Content-Type must be application/json"
+                   : "Content-Type must be application/octet-stream";
+    }
+    char origin[96], host[80];
+    if (httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
+        const char *o = strstr(origin, "://");
+        if (o == NULL || httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
+            strcasecmp(o + 3, host) != 0) {
+            return "cross-origin request refused";
+        }
+    }
+    return NULL;
+}
+
+esp_err_t web_send_forbidden(httpd_req_t *req, const char *why) {
+    ESP_LOGW(TAG, "refused %s: %s", req->uri, why);
+    return send_error(req, "403 Forbidden", why);
+}
+
+#define GUARD(req, type)                                  \
+    do {                                                  \
+        const char *guard_why = web_post_guard(req, type); \
+        if (guard_why != NULL) {                          \
+            return web_send_forbidden(req, guard_why);    \
+        }                                                 \
+    } while (0)
+
 /* ---------- static files ---------- */
 
 static esp_err_t send_static(httpd_req_t *req, const char *type, const uint8_t *start,
@@ -200,6 +236,8 @@ static esp_err_t info_get(httpd_req_t *req) {
 
     cJSON_AddStringToObject(root, "backend", HAL_BACKEND_NAME);
     cJSON_AddStringToObject(root, "hostname", settings_get()->hostname);
+    cJSON_AddNumberToObject(root, "boot", settings_get()->boot_count);
+    cJSON_AddStringToObject(root, "reset_reason", events_reset_reason());
 
     const model_t *m = model_store_current();
     double dt = m != NULL ? m->hdr.dt : CTRL_DEFAULT_PERIOD_US * 1e-6;
@@ -235,6 +273,13 @@ static esp_err_t status_get(httpd_req_t *req) {
     return err;
 }
 
+/* ---------- GET /api/events ---------- */
+
+static esp_err_t events_get(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return send_json(req, "200 OK", events_json());
+}
+
 /* ---------- POST /api/cmd ---------- */
 
 static int pose_index(const model_t *m, const char *label) {
@@ -247,6 +292,7 @@ static int pose_index(const model_t *m, const char *label) {
 }
 
 static esp_err_t cmd_post(httpd_req_t *req) {
+    GUARD(req, "application/json");
     const char *why = NULL;
     cJSON *j = read_json(req, &why);
     if (j == NULL) {
@@ -419,6 +465,7 @@ static void leave_maint(void) {
 }
 
 static esp_err_t model_post(httpd_req_t *req) {
+    GUARD(req, "application/octet-stream");
     ctrl_status_t st;
     control_get_status(&st);
     if (st.run == NCP_RUN_ARMED) {
@@ -461,7 +508,7 @@ static esp_err_t model_post(httpd_req_t *req) {
         return send_error(req, "503 Service Unavailable", "control loop busy");
     }
     model_store_unload();
-    ESP_LOGI(TAG, "receiving model '%.64s' (%u bytes)", h.label, (unsigned)total);
+    events_add(EV_INFO, "receiving model '%.48s' (%u bytes)", h.label, (unsigned)total);
 
     model_store_write_begin();
     esp_err_t err = model_store_write(0, buf, NCP_HEADER_SIZE);
@@ -488,7 +535,7 @@ static esp_err_t model_post(httpd_req_t *req) {
     control_wait_model(m, 1000);
     leave_maint();
     if (m == NULL) {
-        ESP_LOGE(TAG, "model upload failed: %s", why);
+        events_add(EV_ERROR, "model upload failed: %s", why);
         return send_error(req, "400 Bad Request", why);
     }
     cJSON *o = cJSON_CreateObject();
@@ -500,6 +547,7 @@ static esp_err_t model_post(httpd_req_t *req) {
 /* ---------- POST /api/wifi, /api/reboot ---------- */
 
 static esp_err_t wifi_post(httpd_req_t *req) {
+    GUARD(req, "application/json");
     ctrl_status_t st;
     control_get_status(&st);
     if (st.run == NCP_RUN_ARMED) {
@@ -536,9 +584,62 @@ static esp_err_t wifi_post(httpd_req_t *req) {
     return send_ok(req);
 }
 
+/* Forget the stored network and reboot into the setup access point. */
+static esp_err_t wifi_forget_post(httpd_req_t *req) {
+    GUARD(req, "application/json");
+    ctrl_status_t st;
+    control_get_status(&st);
+    if (st.run == NCP_RUN_ARMED) {
+        return send_error(req, "409 Conflict", "disarm first");
+    }
+    esp_err_t err = settings_forget_wifi();
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    }
+    events_add(EV_WARN, "Wi-Fi network forgotten: rebooting into the setup access point");
+    err = send_ok(req);
+    ota_reboot_later(800);
+    return err;
+}
+
+static esp_err_t hostname_post(httpd_req_t *req) {
+    GUARD(req, "application/json");
+    ctrl_status_t st;
+    control_get_status(&st);
+    if (st.run == NCP_RUN_ARMED) {
+        return send_error(req, "409 Conflict", "disarm first");
+    }
+    const char *why = NULL;
+    cJSON *j = read_json(req, &why);
+    if (j == NULL) {
+        return send_error(req, "400 Bad Request", why);
+    }
+    const cJSON *hn = cJSON_GetObjectItemCaseSensitive(j, "hostname");
+    char name[33] = "";
+    if (cJSON_IsString(hn) && strlen(hn->valuestring) < sizeof(name)) {
+        strlcpy(name, hn->valuestring, sizeof(name));
+    }
+    cJSON_Delete(j);
+    if (!settings_hostname_valid(name)) {
+        return send_error(req, "400 Bad Request", "hostname: 1-32 of a-z, 0-9 and '-', not starting or ending with '-'");
+    }
+    esp_err_t err = settings_save_hostname(name);
+    if (err != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", esp_err_to_name(err));
+    }
+    net_set_hostname(name);
+    events_add(EV_INFO, "hostname: %s.local", name);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddStringToObject(o, "hostname", name);
+    return send_json(req, "200 OK", o);
+}
+
 static esp_err_t reboot_post(httpd_req_t *req) {
+    GUARD(req, "application/json");
     ctrl_cmd_t c = {.kind = CTRL_CMD_ARM, .i = 0};
     control_send(&c); /* drive off before the reset */
+    events_add(EV_INFO, "reboot requested");
     esp_err_t err = send_ok(req);
     ota_reboot_later(500);
     return err;
@@ -689,7 +790,7 @@ esp_err_t web_start(void) {
     cfg.core_id = 0;
     cfg.task_priority = 5;
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 16;
+    cfg.max_uri_handlers = 20;
     cfg.max_open_sockets = 7;
     cfg.lru_purge_enable = true;
     cfg.recv_wait_timeout = 10;
@@ -708,12 +809,15 @@ esp_err_t web_start(void) {
         {.uri = "/style.css", .method = HTTP_GET, .handler = style_css_get},
         {.uri = "/api/info", .method = HTTP_GET, .handler = info_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
+        {.uri = "/api/events", .method = HTTP_GET, .handler = events_get},
         {.uri = "/api/cmd", .method = HTTP_POST, .handler = cmd_post},
         {.uri = "/api/model", .method = HTTP_GET, .handler = model_get},
         {.uri = "/api/model", .method = HTTP_POST, .handler = model_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_upload_handler},
         {.uri = "/api/record", .method = HTTP_GET, .handler = record_get_handler},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
+        {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = wifi_forget_post},
+        {.uri = "/api/hostname", .method = HTTP_POST, .handler = hostname_post},
         {.uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post},
         {.uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true},
     };

@@ -12,6 +12,7 @@ idf_component_register(
         "settings.c"
         "ota.c"
         "record.c"
+        "events.c"
     INCLUDE_DIRS "."
     # The dashboard, served from the app image (symbols _binary_<name>_start/_end).
     EMBED_FILES

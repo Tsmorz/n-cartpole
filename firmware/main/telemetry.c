@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "events.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -162,6 +163,50 @@ static void model_strings(const ctrl_status_t *st, model_strs_t *out) {
     model_store_unlock();
 }
 
+/* Sensors, drive and zero references (rig); {"rig": false} on the simulator. */
+static void add_io(cJSON *root, const ctrl_status_t *st) {
+    const ncp_hal_io_t *io = &st->io;
+    cJSON *o = cJSON_AddObjectToObject(root, "io");
+    cJSON_AddBoolToObject(o, "rig", io->rig);
+    if (!io->rig) {
+        return;
+    }
+    cJSON_AddBoolToObject(o, "estop", io->estop);
+    cJSON_AddBoolToObject(o, "drive", io->drive_on);
+    cJSON_AddNumberToObject(o, "duty", round(io->duty * 1000.0) / 1000.0);
+    cJSON_AddNumberToObject(o, "dir", io->dir);
+    cJSON_AddNumberToObject(o, "cart_count", io->cart_count);
+    cJSON_AddNumberToObject(o, "read_errors", io->read_errors);
+    cJSON *enc = cJSON_AddArrayToObject(o, "enc");
+    for (int i = 0; i < 2; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "raw", io->enc[i].raw);
+        cJSON_AddNumberToObject(e, "bad", io->enc[i].bad);
+        if (io->enc[i].diag) {
+            cJSON_AddNumberToObject(e, "agc", io->enc[i].agc);
+            cJSON_AddBoolToObject(e, "ocf", io->enc[i].ocf);
+            cJSON_AddBoolToObject(e, "cof", io->enc[i].cof);
+            cJSON_AddBoolToObject(e, "comp_low", io->enc[i].comp_low);
+            cJSON_AddBoolToObject(e, "comp_high", io->enc[i].comp_high);
+        }
+        cJSON_AddItemToArray(enc, e);
+    }
+
+    const settings_t *cfg = settings_get();
+    cJSON *cal = cJSON_AddObjectToObject(root, "calib");
+    cJSON_AddBoolToObject(cal, "angles", st->cal_angles);
+    cJSON_AddBoolToObject(cal, "cart", st->cal_cart);
+    if (cfg->have_angle_offsets) {
+        cJSON_AddNumberToObject(cal, "off1", round(cfg->angle_off1 * 1e5) / 1e5);
+        cJSON_AddNumberToObject(cal, "off2", round(cfg->angle_off2 * 1e5) / 1e5);
+        cJSON_AddNumberToObject(cal, "angles_boot", cfg->angles_boot);
+    }
+    if (cfg->have_cart_zero) {
+        cJSON_AddNumberToObject(cal, "x_zero", round(cfg->x_zero * 1e5) / 1e5);
+        cJSON_AddNumberToObject(cal, "cart_boot", cfg->cart_boot);
+    }
+}
+
 static void build_status(const ctrl_status_t *st, const model_strs_t *ms) {
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
@@ -218,6 +263,18 @@ static void build_status(const ctrl_status_t *st, const model_strs_t *ms) {
     cJSON_AddStringToObject(join, "error", ni.join_error);
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
+    cJSON_AddNumberToObject(root, "boot", settings_get()->boot_count);
+    cJSON_AddNumberToObject(root, "events_seq", events_seq());
+
+    cJSON *faults = cJSON_AddObjectToObject(root, "faults");
+    cJSON_AddNumberToObject(faults, "count", st->fault_count);
+    cJSON_AddStringToObject(faults, "last", ctrl_fault_str(st->last_fault));
+    if (st->fault_count > 0) {
+        cJSON_AddNumberToObject(faults, "ago_s",
+                                round((double)(st->ticks - st->last_fault_tick) * st->dt * 10.0) / 10.0);
+    }
+
+    add_io(root, st);
     add_tasks(root);
 
     xSemaphoreTake(s_status_lock, portMAX_DELAY);
@@ -244,42 +301,69 @@ size_t tlm_status_json(char *buf, size_t size) {
 
 /* ---------- logging and persistence on behalf of core 1 ---------- */
 
+/* Every 0.5 s: turn changes in the control task's status into events (the event log
+ * also logs them). Faults are counted by the task, so one between two looks still shows. */
 static void watch(const ctrl_status_t *st, const model_strs_t *ms) {
     static ctrl_status_t prev;
     static bool have;
-    if (!have || st->run != prev.run || st->fault != prev.fault) {
-        if (st->run == NCP_RUN_FAULT) {
-            ESP_LOGW(TAG, "FAULT: %s", ctrl_fault_str(st->fault));
-        } else if (have) {
-            ESP_LOGI(TAG, "run: %s -> %s", ctrl_run_str(prev.run), ctrl_run_str(st->run));
+    static uint32_t miss_acc;
+    static int64_t miss_at;
+    if (!have) {
+        prev = *st;
+        have = true;
+        return;
+    }
+    if (st->fault_count > prev.fault_count) {
+        uint32_t n = st->fault_count - prev.fault_count;
+        events_add(EV_ERROR, "FAULT: %s%s", ctrl_fault_str(st->last_fault),
+                   n > 1 ? " (and earlier ones since the last look)" : "");
+    }
+    if (st->run != prev.run) {
+        if (st->run == NCP_RUN_ARMED) {
+            events_add(EV_INFO, "armed: %s%s%s", st->mode == NCP_MODE_MANUAL ? "manual" : "AI",
+                       st->mode == NCP_MODE_MANUAL ? "" : " -> ", st->mode == NCP_MODE_MANUAL ? "" : ms->goal);
+        } else if (st->run == NCP_RUN_IDLE && (prev.run == NCP_RUN_ARMED || prev.run == NCP_RUN_FAULT)) {
+            events_add(EV_INFO, prev.run == NCP_RUN_FAULT ? "fault cleared (disarmed)" : "disarmed");
         }
     }
-    if (have && st->model != prev.model) {
-        ESP_LOGI(TAG, "control loop now runs %s", ms->have ? ms->label : "no model");
+    if (st->mode != prev.mode && st->model != NULL) {
+        events_add(EV_INFO, "mode: %s", st->mode == NCP_MODE_MANUAL ? "manual" : "AI");
     }
-    if (have && st->budget_ok != prev.budget_ok && st->model != NULL) {
-        ESP_LOGW(TAG, "loop budget %s: exec avg %lu us / max %lu us, period %lu us",
-                 st->budget_ok ? "ok again" : "EXCEEDED", (unsigned long)st->exec_avg_us,
-                 (unsigned long)st->exec_max_us, (unsigned long)st->period_us);
+    if (st->model != prev.model) {
+        events_add(EV_INFO, "model: %s", ms->have ? ms->label : "none");
     }
-    if (have && st->period_us != prev.period_us && HAL_IS_SIM) {
+    if (st->budget_ok != prev.budget_ok && st->model != NULL) {
+        events_add(st->budget_ok ? EV_INFO : EV_WARN,
+                   "loop budget %s: exec avg %lu us, max %lu us, period %lu us",
+                   st->budget_ok ? "ok again" : "exceeded", (unsigned long)st->exec_avg_us,
+                   (unsigned long)st->exec_max_us, (unsigned long)st->nominal_period_us);
+    }
+    if (st->period_us != prev.period_us && HAL_IS_SIM) {
         ESP_LOGI(TAG, "sim period %lu us (real-time factor %.2f)", (unsigned long)st->period_us,
                  (double)st->rt_factor);
     }
-    if (have && st->misses > prev.misses && st->run == NCP_RUN_ARMED) {
-        ESP_LOGW(TAG, "%lu deadline miss(es)", (unsigned long)(st->misses - prev.misses));
+    /* Deadline misses while armed: summed, at most one event per 10 s. */
+    if (st->misses > prev.misses && st->run == NCP_RUN_ARMED) {
+        miss_acc += st->misses - prev.misses;
+    }
+    int64_t now = esp_timer_get_time();
+    if (miss_acc > 0 && now - miss_at > 10 * 1000000LL) {
+        events_add(EV_WARN, "%lu deadline miss(es) while armed", (unsigned long)miss_acc);
+        miss_acc = 0;
+        miss_at = now;
     }
     prev = *st;
-    have = true;
 
     double a, b;
     if (control_take_angle_offsets(&a, &b)) {
         esp_err_t err = settings_save_angle_offsets(a, b);
-        ESP_LOGI(TAG, "zeroed angles: off1 %.5f off2 %.5f rad (%s)", a, b, esp_err_to_name(err));
+        events_add(err == ESP_OK ? EV_INFO : EV_ERROR, "angles zeroed: off1 %.4f, off2 %.4f rad%s%s", a,
+                   b, err == ESP_OK ? "" : ", not saved: ", err == ESP_OK ? "" : esp_err_to_name(err));
     }
     if (control_take_cart_zero(&a)) {
         esp_err_t err = settings_save_cart_zero(a);
-        ESP_LOGI(TAG, "zeroed cart: x_zero %.5f m (%s)", a, esp_err_to_name(err));
+        events_add(err == ESP_OK ? EV_INFO : EV_ERROR, "cart zeroed: x_zero %.4f m%s%s", a,
+                   err == ESP_OK ? "" : ", not saved: ", err == ESP_OK ? "" : esp_err_to_name(err));
     }
 }
 

@@ -20,3 +20,4 @@ checkpoints/
 firmware/managed_components/
 firmware/sdkconfig
 firmware/sdkconfig.old
+firmware/build-rig/

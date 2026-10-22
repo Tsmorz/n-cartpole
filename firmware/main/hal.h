@@ -36,6 +36,30 @@ uint32_t ncp_hal_read_errors(void);
 void ncp_hal_apply(bool armed, double force);
 
 bool ncp_hal_estop(void);
+
+/* What the sensors and the drive are doing, for the dashboard (control task only: it
+ * copies this into the published status). AS5048A diagnostics are read once a second
+ * per encoder (register 0x3FFD): AGC 0 = strong field .. 255 = weak field, COMP low /
+ * high = magnet too close / too far, COF = CORDIC overflow, OCF = offset compensation
+ * finished (should be set). */
+typedef struct {
+    bool rig;          /* false: the simulator (no sensors, no drive) */
+    bool estop;
+    bool drive_on;     /* EN asserted */
+    float duty;        /* PWM duty 0..1 */
+    int8_t dir;        /* +1 / -1: the commanded direction */
+    int32_t cart_count;
+    uint32_t read_errors; /* consecutive bad joint reads */
+    struct {
+        uint16_t raw;  /* last good raw angle, 0..16383 */
+        uint32_t bad;  /* bad reads since boot (SPI, parity, error flag) */
+        bool diag;     /* the fields below have been read */
+        uint8_t agc;
+        bool ocf, cof, comp_low, comp_high;
+    } enc[2];
+} ncp_hal_io_t;
+
+void ncp_hal_io(ncp_hal_io_t *out);
 bool ncp_hal_off_rail(const double *pos, double x_lim);
 
 /* Simulator only (no-ops on the rig). */

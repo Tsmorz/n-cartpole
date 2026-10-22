@@ -41,3 +41,6 @@ void net_get_info(net_info_t *out);
  * access point, the AP is dropped after a grace period so a client can read the result;
  * on failure nothing is saved and the previous network (or the AP) stays. */
 esp_err_t net_join_start(const char *ssid, const char *password);
+
+/* A new mDNS / DHCP hostname, live (the DHCP name reaches the router on the next lease). */
+void net_set_hostname(const char *hostname);

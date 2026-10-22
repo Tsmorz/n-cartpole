@@ -1,6 +1,7 @@
 /* settings.c — NVS-backed settings (see settings.h). */
 #include "settings.h"
 
+#include <ctype.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -12,11 +13,18 @@ static const char *TAG = "settings";
 static const char *NS = "ncp";
 static settings_t s_settings;
 
-static void load_str(nvs_handle_t h, const char *key, char *dst, size_t size) {
+static bool load_str(nvs_handle_t h, const char *key, char *dst, size_t size) {
     size_t len = size;
     if (nvs_get_str(h, key, dst, &len) != ESP_OK) {
         dst[0] = '\0';
+        return false;
     }
+    return true;
+}
+
+static uint32_t load_u32(nvs_handle_t h, const char *key) {
+    uint32_t v = 0;
+    return nvs_get_u32(h, key, &v) == ESP_OK ? v : 0;
 }
 
 static bool load_double(nvs_handle_t h, const char *key, double *out) {
@@ -41,9 +49,16 @@ esp_err_t settings_init(void) {
     }
 
     memset(&s_settings, 0, sizeof(s_settings));
+    bool ssid_stored = false;
     nvs_handle_t h;
-    if (nvs_open(NS, NVS_READONLY, &h) == ESP_OK) {
-        load_str(h, "ssid", s_settings.ssid, sizeof(s_settings.ssid));
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        s_settings.boot_count = load_u32(h, "boots") + 1;
+        if (nvs_set_u32(h, "boots", s_settings.boot_count) == ESP_OK) {
+            nvs_commit(h);
+        }
+        s_settings.angles_boot = load_u32(h, "off_boot");
+        s_settings.cart_boot = load_u32(h, "xz_boot");
+        ssid_stored = load_str(h, "ssid", s_settings.ssid, sizeof(s_settings.ssid));
         load_str(h, "pass", s_settings.password, sizeof(s_settings.password));
         load_str(h, "host", s_settings.hostname, sizeof(s_settings.hostname));
         bool a = load_double(h, "off1", &s_settings.angle_off1);
@@ -52,7 +67,7 @@ esp_err_t settings_init(void) {
         s_settings.have_cart_zero = load_double(h, "xzero", &s_settings.x_zero);
         nvs_close(h);
     }
-    if (s_settings.ssid[0] == '\0' && CONFIG_NCP_WIFI_SSID[0] != '\0') {
+    if (!ssid_stored && CONFIG_NCP_WIFI_SSID[0] != '\0') { /* an empty stored SSID: forgotten */
         strlcpy(s_settings.ssid, CONFIG_NCP_WIFI_SSID, sizeof(s_settings.ssid));
         strlcpy(s_settings.password, CONFIG_NCP_WIFI_PASSWORD, sizeof(s_settings.password));
     }
@@ -85,7 +100,43 @@ esp_err_t settings_save_wifi(const char *ssid, const char *password) {
     return err;
 }
 
-static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double v2) {
+esp_err_t settings_forget_wifi(void) { return settings_save_wifi("", ""); }
+
+bool settings_hostname_valid(const char *s) {
+    size_t n = s != NULL ? strlen(s) : 0;
+    if (n == 0 || n > 32 || s[0] == '-' || s[n - 1] == '-') {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!(islower((unsigned char)s[i]) || isdigit((unsigned char)s[i]) || s[i] == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+esp_err_t settings_save_hostname(const char *hostname) {
+    if (!settings_hostname_valid(hostname)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, "host", hostname);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        strlcpy(s_settings.hostname, hostname, sizeof(s_settings.hostname));
+    }
+    return err;
+}
+
+/* k1 (and k2), plus the current boot number under kboot. */
+static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double v2, const char *kboot) {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -96,6 +147,9 @@ static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double 
         err = nvs_set_blob(h, k2, &v2, sizeof(v2));
     }
     if (err == ESP_OK) {
+        err = nvs_set_u32(h, kboot, s_settings.boot_count);
+    }
+    if (err == ESP_OK) {
         err = nvs_commit(h);
     }
     nvs_close(h);
@@ -103,20 +157,22 @@ static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double 
 }
 
 esp_err_t settings_save_angle_offsets(double off1, double off2) {
-    esp_err_t err = save_doubles("off1", off1, "off2", off2);
+    esp_err_t err = save_doubles("off1", off1, "off2", off2, "off_boot");
     if (err == ESP_OK) {
         s_settings.angle_off1 = off1;
         s_settings.angle_off2 = off2;
         s_settings.have_angle_offsets = true;
+        s_settings.angles_boot = s_settings.boot_count;
     }
     return err;
 }
 
 esp_err_t settings_save_cart_zero(double x_zero) {
-    esp_err_t err = save_doubles("xzero", x_zero, NULL, 0.0);
+    esp_err_t err = save_doubles("xzero", x_zero, NULL, 0.0, "xz_boot");
     if (err == ESP_OK) {
         s_settings.x_zero = x_zero;
         s_settings.have_cart_zero = true;
+        s_settings.cart_boot = s_settings.boot_count;
     }
     return err;
 }

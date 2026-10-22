@@ -29,8 +29,10 @@ sample per 200 Hz tick (the env's encoder readings, command, its excitation part
 applied force, estimate, true state), the excitation added to the drive force
 while armed (capped at 10 N).
 
-Mock-only command, for checking how the dashboard shows faults:
-``POST /api/cmd {"inject_fault": "e-stop"}``.
+Mock-only commands, for checking how the dashboard shows trouble:
+``POST /api/cmd {"inject_fault": "e-stop"}`` (any fault reason) and, with ``--rig``,
+``{"inject_io": "weak-magnet"}`` / ``"bad-reads"`` / ``"ok"`` (encoder diagnostics).
+``--uncalibrated`` starts a rig whose zero references are not set (arming is refused).
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ import hashlib
 import json
 import logging
 import queue
+import re
 import socket
 import struct
 import sys
@@ -384,6 +387,30 @@ class Device:
         self.built = time.strftime("%b %d %Y %H:%M:%S")
         self.ota_running, self.ota_next, self.ota_state = "ota_0", "ota_1", "valid"
         self.pending_until = 0.0
+        self.hostname = "cartpole"
+        self.boot_count = 7
+        self.events: collections.deque[dict[str, Any]] = collections.deque(maxlen=40)
+        self.events_seq = 0
+        self.fault_count = 0
+        self.last_fault = ""
+        self.last_fault_t = 0.0
+        self.calib: dict[str, Any] = (
+            {"angles": False, "cart": False}
+            if args.uncalibrated
+            else {
+                "angles": True,
+                "cart": True,
+                "off1": 2.81734,
+                "off2": -0.41263,
+                "angles_boot": 5,
+                "x_zero": 0.01275,
+                "cart_boot": 5,
+            }
+        )
+        self.enc_bad = [0, 0]
+        self.enc_agc = [72, 88]
+        self.enc_weak = False
+        self.forget_wifi = False
         self.wifi = {
             "mode": "sta",
             "ssid": "workshop",
@@ -421,6 +448,48 @@ class Device:
         self.rec_start_us = 0
         self.rec_file: bytes | None = None
         self._reset_plant("DD")
+        self.event(
+            "info",
+            f"boot #{self.boot_count}: v{self.version}, "
+            f"{'rig' if self.rig else 'sim'} backend, reset: power-on",
+        )
+        if self.rig and not self.calib["angles"]:
+            self.event(
+                "warn", "rig angles not zeroed: hang the links at rest and Zero angles"
+            )
+        if self.rig and not self.calib["cart"]:
+            self.event("warn", "cart not zeroed: centre it and Zero cart")
+
+    # -- the event log (events.c) --
+    def event(self, level: str, msg: str) -> None:
+        """Append to the device event log."""
+        self.events_seq += 1
+        self.events.append(
+            {
+                "seq": self.events_seq,
+                "boot": self.boot_count,
+                # max: the reboot logs its boot line just before the new boot's clock starts
+                "t_ms": max(0, int((time.monotonic() - self.boot) * 1000)),
+                "level": level,
+                "msg": msg,
+            }
+        )
+        log.info("event %s: %s", level, msg)
+
+    def events_json(self) -> dict[str, Any]:
+        """GET /api/events."""
+        return {
+            "seq": self.events_seq,
+            "boot": self.boot_count,
+            "uptime_ms": int((time.monotonic() - self.boot) * 1000),
+            "events": list(self.events),
+        }
+
+    def _trip(self, why: str) -> None:
+        self.run, self.fault, self.fault_t = RUN_FAULT, why, time.monotonic()
+        self.fault_count += 1
+        self.last_fault, self.last_fault_t = why, self.fault_t
+        self.event("error", f"FAULT: {why}")
 
     # -- setup --
     def _repo_version(self) -> str:
@@ -552,6 +621,7 @@ class Device:
             "reset": lambda: val in self.labels,
             "zero": lambda: val in ("angles", "cart"),
             "inject_fault": lambda: isinstance(val, str) and bool(val),
+            "inject_io": lambda: val in ("weak-magnet", "bad-reads", "ok"),
             "record": lambda: isinstance(val, dict)
             and val.get("action") in ("start", "stop"),
             "excite": lambda: val is None
@@ -568,6 +638,12 @@ class Device:
                 return "loop budget exceeded: the model is too slow for the rig"
             if self.mode == MODE_AI and not self.can_ai():
                 return "no model on the device"
+            if self.rig and not self.calib["angles"]:
+                return "angles not zeroed: hang the links at rest and Zero angles"
+            if self.rig and not self.calib["cart"]:
+                return "cart not zeroed: centre it and Zero cart"
+        if key == "inject_io" and not self.rig:
+            return "inject_io is rig-only (--rig)"
         if key == "mode" and val == "ai" and not self.can_ai():
             return "no model on the device"
         if key == "reset" and self.rig:
@@ -591,12 +667,24 @@ class Device:
     def _apply(self, cmd: dict[str, Any]) -> None:
         key, val = next(iter(cmd.items()))
         if key == "arm":
-            if val:
+            if val and self.run != RUN_ARMED:
                 self.run, self.fault = RUN_ARMED, ""
-            elif self.run == RUN_ARMED:
-                self.run = RUN_IDLE
+                ai = self.mode == MODE_AI
+                self.event(
+                    "info",
+                    f"armed: {'AI -> ' + self.labels[self.goal] if ai else 'manual'}",
+                )
+            elif not val and self.run in (RUN_ARMED, RUN_FAULT):
+                self.event(
+                    "info",
+                    "fault cleared (disarmed)" if self.run == RUN_FAULT else "disarmed",
+                )
+                self.run, self.fault = RUN_IDLE, ""
         elif key == "mode":
-            self.mode = MODE_AI if val == "ai" else MODE_MANUAL
+            new = MODE_AI if val == "ai" else MODE_MANUAL
+            if new != self.mode:
+                self.event("info", f"mode: {'AI' if new == MODE_AI else 'manual'}")
+            self.mode = new
         elif key == "goal":
             self.random = False
             self._set_goal(self.labels.index(val))
@@ -611,7 +699,24 @@ class Device:
             if self.run == RUN_FAULT:
                 self.run = RUN_IDLE
         elif key == "zero":
-            log.info("zero %s (rig): pretend the encoders were re-referenced", val)
+            if val == "angles":
+                self.calib.update(
+                    angles=True,
+                    off1=round(float(self.rng.uniform(-3, 3)), 5),
+                    off2=round(float(self.rng.uniform(-3, 3)), 5),
+                    angles_boot=self.boot_count,
+                )
+                self.event(
+                    "info",
+                    f"angles zeroed: off1 {self.calib['off1']:.4f}, off2 {self.calib['off2']:.4f} rad",
+                )
+            else:
+                self.calib.update(
+                    cart=True,
+                    x_zero=round(float(self.rng.uniform(-0.02, 0.02)), 5),
+                    cart_boot=self.boot_count,
+                )
+                self.event("info", f"cart zeroed: x_zero {self.calib['x_zero']:.4f} m")
         elif key == "record":
             if val["action"] == "start":
                 self._record_start(val)
@@ -623,7 +728,15 @@ class Device:
             )
             self.base_cmd = float(self.env._prev_cmd)
         elif key == "inject_fault":
-            self.run, self.fault, self.fault_t = RUN_FAULT, val, time.monotonic()
+            self._trip(val)
+        elif key == "inject_io":
+            if val == "weak-magnet":
+                self.enc_weak = True
+            if val == "bad-reads":
+                self.enc_bad[1] += 37
+            if val == "ok":
+                self.enc_weak = False
+                self.enc_bad = [0, 0]
 
     def _set_goal(self, goal: int) -> None:
         self.goal = goal
@@ -792,7 +905,7 @@ class Device:
             )
             applied = float(info["applied_force"])
             if terminated:
-                self.run, self.fault, self.fault_t = RUN_FAULT, "off rail", now
+                self._trip("off rail")
         cmd = float(self.env._prev_cmd)
         if self.rec_state == "recording":
             nan = [float("nan")] * MAX_STATE
@@ -1002,6 +1115,16 @@ class Device:
             },
             "wifi": dict(self.wifi),
             "uptime_s": int(time.monotonic() - self.boot),
+            "boot": self.boot_count,
+            "events_seq": self.events_seq,
+            "faults": {"count": self.fault_count, "last": self.last_fault}
+            | (
+                {"ago_s": round(time.monotonic() - self.last_fault_t, 1)}
+                if self.fault_count
+                else {}
+            ),
+            "io": self.io_status(),
+            **({"calib": dict(self.calib)} if self.rig else {}),
             "cores": [
                 {"id": 0, "load": round(min(100.0, busy0), 1)},
                 {"id": 1, "load": round(min(100.0, ctrl_cpu + 0.4), 1)},
@@ -1011,6 +1134,43 @@ class Device:
             "excite": self.excite.status()
             if self.excite
             else {"kind": "none", "active": False, "t": 0.0},
+        }
+
+    def io_status(self) -> dict[str, Any]:
+        """Report the rig's sensors and drive (hal.h ncp_hal_io_t); {"rig": false} on the sim."""
+        if not self.rig:
+            return {"rig": False}
+        meas = self.env.last_meas
+        pos = [0.0, np.pi, np.pi] if meas is None else list(meas)
+        raws = [pos[1], pos[2] - pos[1]]  # joint 2 reads link 2 relative to link 1
+        cmd = float(self.env._prev_cmd) if self.run == RUN_ARMED else 0.0
+        enc = []
+        for i, a in enumerate(raws):
+            agc = (
+                236
+                if self.enc_weak and i == 1
+                else self.enc_agc[i] + int(self.rng.integers(-2, 3))
+            )
+            enc.append(
+                {
+                    "raw": int((a % (2 * np.pi)) / (2 * np.pi) * 16384) % 16384,
+                    "bad": self.enc_bad[i],
+                    "agc": agc,
+                    "ocf": True,
+                    "cof": False,
+                    "comp_low": False,
+                    "comp_high": self.enc_weak and i == 1,
+                }
+            )
+        return {
+            "rig": True,
+            "estop": self.run == RUN_FAULT and self.fault == "e-stop",
+            "drive": self.run == RUN_ARMED,
+            "duty": round(min(1.0, abs(cmd) / 15.35), 3),
+            "dir": 1 if cmd >= 0 else -1,
+            "cart_count": int(pos[0] / (2 * np.pi * 6.35e-3 / 4000)),
+            "read_errors": 0,
+            "enc": enc,
         }
 
     def info(self) -> dict[str, Any]:
@@ -1037,7 +1197,9 @@ class Device:
                 "state": self.ota_state,
             },
             "backend": "rig" if self.rig else "sim",
-            "hostname": "cartpole",
+            "hostname": self.hostname,
+            "boot": self.boot_count,
+            "reset_reason": "power-on",
             "telemetry": {
                 "version": TLM_VERSION,
                 "frame_size": FRAME.size,
@@ -1086,8 +1248,10 @@ class Device:
                 join.update(
                     state="failed", error="authentication failed (wrong password?)"
                 )
+                self.event("warn", f"Wi-Fi: could not join '{ssid}': {join['error']}")
                 return
             join.update(state="ok", ip="192.168.1.77")
+            self.event("info", f"Wi-Fi: joined '{ssid}' at 192.168.1.77")
             time.sleep(5.0)
             self.wifi.update(mode="sta", ssid=ssid, ip="192.168.1.77")
             join.update(state="idle")
@@ -1123,6 +1287,21 @@ class Device:
             self.goal = self.labels.index("DD")
             self._last_loop = {}
             self._reset_plant("DD")
+            self.boot_count += 1
+            self.fault_count, self.last_fault = 0, ""
+            self.event(
+                "info",
+                f"boot #{self.boot_count}: v{self.version}, "
+                f"{'rig' if self.rig else 'sim'} backend, reset: software restart",
+            )
+            if new_version:
+                self.event(
+                    "warn",
+                    "new firmware pending: it is kept if it runs healthy for 10 s",
+                )
+            if self.forget_wifi:
+                self.forget_wifi = False
+                self.wifi.update(mode="ap", ssid="cartpole-3F2A", ip="192.168.4.1")
 
         threading.Thread(target=go, daemon=True).start()
 
@@ -1138,8 +1317,10 @@ class Device:
         h = validate_blob(blob)
         if h["n_links"] != self.n:
             raise ValueError(f"model has {h['n_links']} links, the plant {self.n}")
+        self.event("info", f"receiving model '{h['label'][:48]}' ({len(blob)} bytes)")
         self.write_flash(len(blob))
         self.blob, self.blob_hdr = blob, h
+        self.event("info", f"model: {h['label']}")
         self.args.no_model = False
         if h["obs_dim"] == self.bundle.obs_dim:
             self.policy = blob_policy(blob, h)
@@ -1210,6 +1391,22 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
         def _err(self, code: int, msg: str) -> None:
             self._json({"ok": False, "error": msg}, code)
 
+        def _guard(self, path: str) -> str:
+            """Return why a POST is refused as cross-site (web.c web_post_guard), or ''."""
+            want = (
+                "application/octet-stream"
+                if path in ("/api/model", "/api/ota")
+                else "application/json"
+            )
+            if not (self.headers.get("Content-Type") or "").lower().startswith(want):
+                return f"Content-Type must be {want}"
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                _, sep, rest = origin.partition("://")
+                if not sep or rest.lower() != (self.headers.get("Host") or "").lower():
+                    return "cross-origin request refused"
+            return ""
+
         def _body(self) -> bytes | None:
             n = int(self.headers.get("Content-Length") or 0)
             if n > MAX_UPLOAD:
@@ -1235,6 +1432,8 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
                 self._json(dev.info())
             elif path == "/api/status":
                 self._json(dev.status())
+            elif path == "/api/events":
+                self._json(dev.events_json())
             elif path == "/api/model":
                 if dev.blob is None:
                     self._err(
@@ -1313,6 +1512,10 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
             if self._down():
                 return
             path = self.path.split("?", 1)[0]
+            why = self._guard(path)
+            if why:
+                self._err(403, why)
+                return
             body = self._body()
             if body is None:
                 return
@@ -1328,10 +1531,18 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
                     else "expected an object"
                 )
                 if err:
-                    self._err(
-                        400 if "disarm" not in err and "no model" not in err else 409,
-                        err,
+                    # Like the device: a valid command refused in the current state is 409.
+                    conflict = (
+                        "disarm" in err
+                        or "no model" in err
+                        or "not zeroed" in err
+                        or (
+                            "arm" in cmd
+                            and cmd["arm"] is True
+                            and "bad value" not in err
+                        )
                     )
+                    self._err(409 if conflict else 400, err)
                     return
                 dev.cmds.put(cmd)
                 self._json({"ok": True})
@@ -1353,6 +1564,10 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
                                 f"wrong project {desc['project']!r} (expected n_cartpole_fw)"
                             )
                         dev.write_flash(len(body))
+                        dev.event(
+                            "info",
+                            f"firmware {desc['version']} written to {dev.ota_next}; rebooting",
+                        )
                         self._json({"ok": True, "version": desc["version"]})
                         dev.reboot(1.0, desc["version"])
                 except ValueError as e:
@@ -1369,7 +1584,37 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
                     return
                 self._json({"ok": True})
                 dev.start_join(ssid, str(w.get("password", "")))
+            elif path == "/api/wifi/forget":
+                if dev.run == RUN_ARMED:
+                    self._err(409, "disarm first")
+                    return
+                dev.forget_wifi = True
+                dev.event(
+                    "warn",
+                    "Wi-Fi network forgotten: rebooting into the setup access point",
+                )
+                self._json({"ok": True})
+                dev.reboot(0.8)
+            elif path == "/api/hostname":
+                try:
+                    name = str(json.loads(body or b"{}")["hostname"])
+                except (ValueError, KeyError, TypeError):
+                    self._err(400, "expected {hostname}")
+                    return
+                if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?", name):
+                    self._err(
+                        400,
+                        "hostname: 1-32 of a-z, 0-9 and '-', not starting or ending with '-'",
+                    )
+                    return
+                if dev.run == RUN_ARMED:
+                    self._err(409, "disarm first")
+                    return
+                dev.hostname = name
+                dev.event("info", f"hostname: {name}.local")
+                self._json({"ok": True, "hostname": name})
             elif path == "/api/reboot":
+                dev.event("info", "reboot requested")
                 self._json({"ok": True})
                 dev.reboot(0.5)
             else:
@@ -1394,6 +1639,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--no-model", action="store_true", help="no model stored on the device"
+    )
+    ap.add_argument(
+        "--uncalibrated",
+        action="store_true",
+        help="rig: the zero references are not set yet (arming is refused)",
     )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()

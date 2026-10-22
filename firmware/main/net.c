@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "events.h"
 #include "mdns.h"
 #include "settings.h"
 
@@ -62,6 +63,20 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     }
 }
 
+/* Modem sleep (the IDF default) lets the radio doze between beacons: it misses multicast
+ * queries, so <host>.local resolved only now and then, and it adds jitter to the telemetry
+ * stream. The board is USB-powered; keep the radio awake. */
+static void no_power_save(void) {
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    wifi_ps_type_t ps = WIFI_PS_MAX_MODEM;
+    esp_wifi_get_ps(&ps);
+    if (err != ESP_OK || ps != WIFI_PS_NONE) {
+        ESP_LOGW(TAG, "could not disable Wi-Fi power save: %s (mode %d)", esp_err_to_name(err), (int)ps);
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi power save off");
+    }
+}
+
 static void start_mdns(const char *hostname) {
     esp_err_t err = mdns_init();
     if (err != ESP_OK) {
@@ -107,6 +122,7 @@ esp_err_t net_start(const char *hostname, const char *ssid, const char *password
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
         ESP_ERROR_CHECK(esp_wifi_start());
+        no_power_save();
         ESP_LOGI(TAG, "connecting to '%s'...", ssid);
     }
     start_mdns(hostname);
@@ -132,6 +148,7 @@ static void start_ap(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
     ESP_ERROR_CHECK(esp_wifi_start());
+    no_power_save();
     esp_netif_ip_info_t ip;
     if (esp_netif_get_ip_info(s_ap, &ip) == ESP_OK) {
         esp_ip4addr_ntoa(&ip.ip, s_ap_ip, sizeof(s_ap_ip));
@@ -201,6 +218,7 @@ static void join_task(void *arg) {
         esp_wifi_set_mode(WIFI_MODE_APSTA); /* the AP follows the station's channel */
     }
     esp_wifi_set_config(WIFI_IF_STA, &wc);
+    no_power_save();
     esp_wifi_disconnect();
     esp_wifi_connect();
 
@@ -215,8 +233,7 @@ static void join_task(void *arg) {
         strlcpy(s_join_ip, s_sta_ip, sizeof(s_join_ip));
         s_have_creds = true;
         s_joining = false;
-        ESP_LOGI(TAG, "joined '%s', IP %s: http://%s.local/", s_join_ssid, s_join_ip,
-                 settings_get()->hostname);
+        events_add(EV_INFO, "Wi-Fi: joined '%s' at %s", s_join_ssid, s_join_ip);
         if (!was_ap) {
             strlcpy(s_ssid, s_join_ssid, sizeof(s_ssid));
         }
@@ -232,7 +249,7 @@ static void join_task(void *arg) {
         s_join = NET_JOIN_IDLE;
     } else {
         join_error_text(s_join_error, sizeof(s_join_error));
-        ESP_LOGW(TAG, "could not join '%s': %s", s_join_ssid, s_join_error);
+        events_add(EV_WARN, "Wi-Fi: could not join '%s': %s", s_join_ssid, s_join_error);
         s_joining = false;
         if (was_ap) {
             esp_wifi_disconnect();
@@ -265,6 +282,13 @@ esp_err_t net_join_start(const char *ssid, const char *password) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+void net_set_hostname(const char *hostname) {
+    if (s_sta != NULL) {
+        esp_netif_set_hostname(s_sta, hostname);
+    }
+    mdns_hostname_set(hostname);
 }
 
 void net_get_info(net_info_t *out) {

@@ -186,6 +186,8 @@
   function goalIndex(n, label) { var g = 0; for (var k = 0; k < n; k++) if (label[k] === 'D') g |= 1 << k; return g; }
   function goalTarget(n, g) { var t = []; for (var k = 0; k < n; k++) t.push((g >> k) & 1 ? Math.PI : 0); return t; }
   function wrapAngle(a) { a = (a + Math.PI) % (2 * Math.PI); if (a < 0) a += 2 * Math.PI; return a - Math.PI; }
+  // Degrees in [−90°, 270°): up (0°) and down (180°) both away from the wrap, so neither flickers in sign.
+  function lane(a) { return wrapAngle(a - Math.PI / 2) * 180 / Math.PI + 90; }
 
   // Labels of the network's inputs, from the blob's dims (ncp_ctrl.h step 2).
   function obsLayout(h) {
@@ -244,7 +246,11 @@
     run: null, mode: null, goal: null, random: false, xref: 0, fault: '', backend: null,
     seg: null, pendingGoal: null, pendingUntil: 0,
     parity: null, netMs: 0, netFps: 0,
-    rebooting: null, lastFrameSeen: 0
+    rebooting: null, lastFrameSeen: 0,
+    link: { frames: 0, fps: null, gaps: 0, lost: 0 },  // telemetry as this page receives it
+    misses: [], missArm: null, statusRun: null,         // deadline misses over time, at arming
+    events: { seq: -1, list: [], loading: false, seenBad: 0 },
+    parityN: 0, parityAt: 0, stale: false
   };
 
   // Geometry and limits: from the blob header when it's loaded, else /api/info, else the rig defaults.
@@ -339,6 +345,7 @@
   var ws = null, wsTimer = null, backoff = 400;
   function setConn(state) {
     S.conn = state;
+    renderStale();
     var c = $('conn');
     c.dataset.state = state;
     setText('conn-text', { live: 'live', connecting: 'connecting', reconnecting: 'reconnecting', rebooting: 'rebooting', offline: 'offline' }[state] || state);
@@ -386,7 +393,31 @@
   // A socket that stays open but goes quiet (Wi-Fi drop without a FIN) is dead too.
   setInterval(function () {
     if (ws && ws.readyState === 1 && performance.now() - S.lastMsg > 4000) { try { ws.close(); } catch (e) {} }
+    S.link.fps = S.conn === 'live' ? S.link.frames : null;
+    S.link.frames = 0;
+    renderLink();
+    renderStale();
+    renderParity();
   }, 1000);
+
+  /* Stale: the connection dropped, or the device stopped sending. Everything that shows a
+     live value fades (CSS .stale) and a banner says since when. */
+  function renderStale() {
+    var now = performance.now();
+    var quietFrames = S.last && now - S.lastFrameSeen > 1500, quietStatus = S.statusAt && now - S.statusAt > 3000;
+    var stale = S.everLive && (S.conn !== 'live' || !!quietFrames || !!quietStatus);
+    if (stale !== S.stale) { S.stale = stale; document.body.classList.toggle('stale', stale); }
+    if (S.conn === 'live') {   // the socket is open but nothing arrives
+      $('conn').dataset.state = stale ? 'reconnecting' : 'live';
+      setText('conn-text', stale ? 'stale' : 'live');
+    }
+    $('stale-banner').hidden = !stale;
+    if (stale) {
+      var since = Math.max(S.lastFrameSeen || 0, S.statusAt || 0), ago = since ? (now - since) / 1000 : null;
+      setText('stale-text', (S.conn === 'rebooting' ? 'The device is rebooting' : S.conn !== 'live' ? 'Connection lost' : 'The device stopped sending') +
+        (ago != null ? ' ' + duration(ago) + ' ago' : '') + ': the values below are frozen.');
+    }
+  }
 
   function loadInfo() {
     return fetchJSON('api/info', null, 5000).then(function (info) {
@@ -401,6 +432,33 @@
       if (!releasesLoaded) loadReleases();
       return info;
     }).catch(function () { /* the socket's reconnect loop retries */ });
+  }
+
+  /* ---- Event log: fetched when status.events_seq moves ---- */
+  function loadEvents() {
+    if (S.events.loading) return;
+    S.events.loading = true;
+    fetchJSON('api/events', null, 4000).then(function (j) {
+      S.events.loading = false;
+      if (!j) return;
+      var wasSeq = S.events.seq;
+      S.events.seq = j.seq; S.events.list = j.events || []; S.events.boot = j.boot; S.events.uptimeMs = j.uptime_ms; S.events.at = performance.now();
+      // Errors that arrived while Health was not on screen mark its tab.
+      var bad = S.events.list.filter(function (e) { return e.level === 'error'; });
+      var newest = bad.length ? bad[bad.length - 1].seq : 0;
+      if (wasSeq < 0) S.events.seenBad = newest;   // the backlog at page load is not news
+      if (S.tab === 'health') S.events.seenBad = newest;
+      S.events.newBad = newest > S.events.seenBad;
+      renderEvents();
+    }).catch(function () { S.events.loading = false; });
+  }
+
+  // Misses per minute over the last minute of status messages.
+  function missRate() {
+    var mh = S.misses;
+    if (mh.length < 2) return null;
+    var a = mh[0], b = mh[mh.length - 1], dt = (b.t - a.t) / 60000;
+    return dt > 0.05 ? (b.n - a.n) / dt : null;
   }
 
   /* ---- Model: download the device's blob, with progress ---- */
@@ -433,6 +491,7 @@
       S.hdr = h;
       S.layout = obsLayout(h);
       S.policy = createPolicy(h, buf);
+      S.parity = null; S.parityN = 0;
       S.model.state = 'ready';
       renderModel();
       buildGoalButtons();
@@ -463,6 +522,12 @@
   function pushFrame(f) {
     var G = geom(), last = S.last;
     if (last && f.tick < last.tick) { S.hist = []; S.seg = null; }   // the device rebooted
+    S.link.frames++;
+    if (last && f.tick > last.tick) {
+      var rate = get(S.info, 'telemetry.rate_hz', 0), step = rate ? Math.max(1, Math.round(1 / (G.dt * rate))) : 0;
+      var missed = step ? Math.round((f.tick - last.tick) / step) - 1 : 0;
+      if (missed > 0) { S.link.gaps++; S.link.lost += missed; }
+    }
     var prevRun = S.run;
     S.last = f; S.lastFrameSeen = performance.now();
     S.run = RUN[f.run] || 'idle'; S.mode = MODE[f.mode] || 'ai';
@@ -481,7 +546,7 @@
     }
 
     var th = [];
-    for (var k = 0; k < G.n; k++) th.push(wrapAngle(f.est[2 + 2 * k] - Math.PI / 2) * 180 / Math.PI + 90);   // [−90°, 270°): up and down both inside the lane
+    for (var k = 0; k < G.n; k++) th.push(lane(f.est[2 + 2 * k]));
     S.hist.push({ tick: f.tick, x: f.est[0], xr: f.x_ref, th: th, cmd: f.cmd, applied: f.applied, loop: f.loop_us, period: f.period_us });
     var keep = HIST_S / G.dt;
     while (S.hist.length && S.hist[0].tick < f.tick - keep) S.hist.shift();
@@ -492,6 +557,16 @@
   /* ---- Status (2 Hz) ---- */
   function onStatus(s) {
     S.status = s; S.statusAt = performance.now();
+    var L = s.loop || {}, now = performance.now();
+    if (L.misses != null) {
+      var mh = S.misses;
+      if (mh.length && L.misses < mh[mh.length - 1].n) { mh.length = 0; S.missArm = null; }   // rebooted
+      mh.push({ t: now, n: L.misses });
+      while (mh.length > 2 && now - mh[0].t > 60000) mh.shift();
+      if (s.run === 'armed' && S.statusRun !== 'armed') S.missArm = L.misses;
+    }
+    S.statusRun = s.run;
+    if (s.events_seq != null && s.events_seq !== S.events.seq) loadEvents();
     if (!S.last || performance.now() - S.lastFrameSeen > 1000) {
       if (s.run) S.run = s.run;
       if (s.mode) S.mode = s.mode;
@@ -523,7 +598,6 @@
     $('backend').dataset.backend = be;
     setText('backend', be ? be.toUpperCase() : '—');
     $('backend').title = be === 'rig' ? 'Real hardware: commands go to the motor drive' : be === 'sim' ? 'Simulated plant on the chip' : 'Plant backend';
-    setText('fw-ver', fw.version || '—');
     setText('model-label', m ? m.label || 'unnamed' : 'none');
     setText('foot-ver', fw.version ? 'v' + fw.version : '');
     setText('foot-chip', [chip.model, chip.mhz && chip.mhz + ' MHz', chip.cores && plural(chip.cores, 'core'), fw.idf && 'ESP-IDF ' + fw.idf].filter(Boolean).join(' · '));
@@ -534,18 +608,25 @@
     $('rig-tools').hidden = be !== 'rig';
 
     kv('sys-kv', [
-      ['chip', [chip.model, chip.revision != null ? 'rev ' + chip.revision : null].filter(Boolean).join(' ') || null],
+      { head: 'chip' },
+      ['model', [chip.model, chip.revision != null ? 'rev ' + chip.revision : null].filter(Boolean).join(' ') || null],
       ['cpu', chip.mhz ? chip.cores + ' × ' + chip.mhz + ' MHz' : null],
       ['flash / psram', chip.flash_mb != null ? chip.flash_mb + ' MB / ' + (chip.psram_mb || 0) + ' MB' : null],
-      ['firmware', fw.version ? 'v' + fw.version : null, 'accent'],
+      { head: 'firmware' },
+      ['version', fw.version ? 'v' + fw.version : null, 'accent'],
+      ['backend', be ? (be === 'rig' ? 'rig (motor drive)' : 'sim (plant on the chip)') : null],
       ['esp-idf', fw.idf],
       ['built', fw.built],
       ['telemetry', I.telemetry ? 'v' + I.telemetry.version + ' · ' + I.telemetry.frame_size + ' B · ' + I.telemetry.rate_hz + ' Hz' : null],
-      { head: 'memory' },
-      ['internal free', null, '', 'heap_caps free (min since boot)'],
-      ['psram free', null],
-      ['uptime', null]
+      { head: 'this boot' },
+      ['boot', I.boot != null ? '#' + I.boot : null],
+      ['last reset', I.reset_reason, /crash|watchdog|brownout/.test(I.reset_reason || '') ? 'bad' : '', 'Why the chip last restarted']
     ]);
+    var hn = $('host-name');
+    if (I.hostname && document.activeElement !== hn) { hn.placeholder = I.hostname; if (!hn.value) hn.value = ''; }
+    var sysTag = $('sys-tag');
+    sysTag.textContent = be ? be + ' build' : '—';
+    sysTag.className = 'tag' + (be === 'rig' ? ' ok' : '');
     kv('ota-kv', [
       ['running', fw.version ? 'v' + fw.version + ' on ' + (ota.running || '?') : ota.running, 'accent'],
       ['next slot', ota.next],
@@ -563,20 +644,25 @@
   function renderModel() {
     var m = get(S.info, 'model', null), h = S.hdr, st = S.model.state;
     $('model-dl').hidden = !m;
+    var why = get(S.info, 'model_error', '');
     if (!m && st !== 'loading') {
-      kv('model-kv', [['model', 'none stored', 'bad'], { head: 'to add one' }, ['export', 'task export-firmware'], ['then', 'drop the .ncpm on Update']]);
+      kv('model-kv', [['model', 'none stored', 'bad'], why ? ['rejected', why, 'bad', 'The stored blob failed validation at boot'] : null,
+        { head: 'to add one' }, ['export', 'task export-firmware'], ['then', 'drop the .ncpm on Update']]);
     } else {
       m = m || {};
       var G = geom(), dtype = m.dtype || (h ? (h.dtype ? 'f16' : 'f32') : null);
+      var goals = m.goals || (h && h.goal ? goalLabels() : null);
       kv('model-kv', [
         ['label', m.label || (h && h.label), 'accent'],
         ['trained', m.step != null ? (m.step / 1e6).toFixed(m.step % 1e6 ? 2 : 0) + ' M steps' : null],
-        ['links', m.n_links || G.n],
-        ['network', (m.hidden || (h && h.hidden)) + ' × ' + (m.blocks != null ? m.blocks : h && h.n_blocks) + ' blocks · ×' + (m.expand || (h && h.expand) || 4)],
+        ['links', (m.n_links || G.n) + (goals && goals.length ? ' · goals ' + goals.join(' ') : '')],
+        { head: 'network' },
+        ['shape', (m.hidden || (h && h.hidden)) + ' × ' + (m.blocks != null ? m.blocks : h && h.n_blocks) + ' blocks · ×' + (m.expand || (h && h.expand) || 4)],
         ['inputs', m.obs_dim || (h && h.obs_dim)],
         ['params', m.params != null ? (m.params / 1e6).toFixed(2) + ' M' : h ? (h.params / 1e6).toFixed(2) + ' M' : null],
         ['size', (m.bytes != null ? bytes(m.bytes) : h ? bytes(h.total_size) : '—') + (dtype ? ' · ' + dtype : '')],
         ['weights in', m.weights_in ? (m.weights_in === 'psram' ? 'PSRAM' : 'internal SRAM') : null],
+        { head: 'control' },
         ['estimator', m.estimator ? (m.estimator === 'ekf' ? 'EKF' : 'differenced') : h ? (h.ekf ? 'EKF' : 'differenced') : null],
         ['action', m.action_mode ? m.action_mode + (m.action_history ? ' · ' + m.action_history + ' past cmds' : '') : null],
         ['delay', m.delay_steps != null ? plural(m.delay_steps, 'step') : null],
@@ -601,7 +687,11 @@
       e.textContent = 'downloading weights' + (pct != null ? ' · ' + pct + ' %' : '') + ' · ' + bytes(S.model.got) + (S.model.total ? ' / ' + bytes(S.model.total) : '');
       return;
     }
-    if (!h) { e.textContent = st === 'none' ? 'no model on the device' : st === 'error' ? 'could not load the model: ' + S.model.error : ''; return; }
+    if (!h) {
+      var why = get(S.info, 'model_error', '');
+      e.textContent = st === 'none' ? 'no model on the device' + (why ? ' · stored one rejected: ' + why : '') : st === 'error' ? 'could not load the model: ' + S.model.error : '';
+      return;
+    }
     var parts = [h.hidden + ' × ' + h.n_blocks + ' blocks', (h.params / 1e6).toFixed(2) + ' M params', h.dtype ? 'f16' : 'f32'];
     if (S.netMs) parts.push('forward ' + S.netMs.toFixed(1) + ' ms');
     var html = esc(parts.join(' · '));
@@ -615,6 +705,9 @@
     var ex = L.exec_avg_us, mx = L.exec_max_us, pol = L.policy_avg_us, est = L.est_avg_us;
     setText('loop-exec', us(ex)); setText('loop-period', us(period));
     setText('fact-exec', ex != null ? Math.round(100 * ex / period) + ' %' : '—');
+    var rate = missRate(), sinceArm = S.missArm != null && L.misses != null && s.run === 'armed' ? L.misses - S.missArm : null;
+    setText('fact-miss', rate != null ? num(rate, rate < 10 ? 1 : 0) : '—');
+    $('fact-miss').className = rate ? 'bad' : '';
     function pct(v) { return clamp(100 * (v || 0) / period, 0, 100); }
     var pp = pct(pol), pe = pct(est), pr = Math.max(0, pct(ex) - pp - pe);
     $('seg-pol').style.width = pp + '%';
@@ -624,13 +717,19 @@
     $('loop-meter').classList.toggle('over', ex != null && ex > 0.8 * period);
     setText('h-pol', us(pol)); setText('h-est', us(est));
     setText('h-max', mx != null ? us(mx) + ' (' + Math.round(100 * mx / period) + ' %)' : '—');
-    setText('h-miss', L.misses != null ? L.misses : '—');
-    $('h-miss').className = L.misses ? 'accent' : '';
+    setText('h-miss', L.misses == null ? '—' : (rate != null ? num(rate, 1) + ' /min' : '…') + (sinceArm != null ? ' · ' + sinceArm + ' since armed' : '') + ' · ' + L.misses + ' total');
+    $('h-miss').className = rate ? 'bad' : L.misses ? 'accent' : '';
+    $('h-miss').title = 'Rate over the last minute; the total counts since boot';
     var rt = L.rt_factor;
     setText('h-rt', rt != null ? '×' + rt.toFixed(2) + (rt < 0.995 ? ' slow motion' : '') : '—');
     var bt = $('budget-tag'), ok = L.budget_ok;
     if (ex == null) { bt.textContent = '—'; bt.className = 'tag'; }
-    else { bt.textContent = ok === false ? 'over budget' : 'within budget'; bt.className = 'tag ' + (ok === false ? 'bad' : 'ok'); }
+    else if (ok === false) { bt.textContent = 'over budget'; bt.className = 'tag bad'; }
+    else if (rate) { bt.textContent = 'missing deadlines'; bt.className = 'tag warn'; }
+    else { bt.textContent = 'within budget'; bt.className = 'tag ok'; }
+    S.healthWarn = (ex != null && ok === false) || !!rate;
+    renderIO(s.io, s.calib);
+    healthAlert();
     setText('h-note', ok === false
       ? (S.backend === 'rig' ? 'Arming is refused while the loop runs over 80 % of its period: pick a smaller model.' : 'Over budget: the simulator stretches its period instead (slow motion), so the model can still be tried.')
       : 'The loop runs the estimator and the network every tick, armed or not, so its timing is known before arming.');
@@ -644,19 +743,10 @@
     });
     renderTasks(s.tasks);
 
-    // System + Wi-Fi
-    var hp = s.heap || {}, w = s.wifi || {};
-    var sys = $('sys-kv');
-    if (sys && sys.children.length) {
-      var dds = sys.querySelectorAll('dd'), n = dds.length;
-      if (n >= 3) {
-        dds[n - 3].textContent = hp.internal_free != null ? bytes(hp.internal_free) + (hp.internal_min != null ? ' (min ' + bytes(hp.internal_min) + ')' : '') : '—';
-        dds[n - 2].textContent = hp.psram_free != null ? bytes(hp.psram_free) : '—';
-        dds[n - 1].textContent = duration(s.uptime_s);
-      }
-    }
+    // Wi-Fi (Settings) and memory + link (Health)
+    var w = s.wifi || {};
     setText('up-tag', s.uptime_s != null ? 'up ' + duration(s.uptime_s) : '—');
-    setText('fact-up', s.uptime_s != null ? duration(s.uptime_s) : '—');
+    renderLink();
     var bars = '', r = w.rssi;
     if (r != null) {
       var lvl = r >= -55 ? 4 : r >= -65 ? 3 : r >= -75 ? 2 : 1;
@@ -667,13 +757,14 @@
       [w.mode === 'ap' ? 'network' : 'joined', w.ssid],
       ['ip', w.ip],
       ['mdns', (get(S.info, 'hostname', null) || 'cartpole') + '.local'],
-      w.mode === 'ap' ? null : ['signal', r != null ? bars + esc(r + ' dBm') : '—'],
-      ['clients', S.conn === 'live' ? 'this page, live' : null]
+      w.mode === 'ap' ? null : ['signal', r != null ? bars + esc(r + ' dBm') : '—']
     ].map(function (row) { if (row && row[0] === 'signal') row.html = true; return row; }));
     var wt = $('wifi-tag');
     wt.textContent = w.mode === 'ap' ? 'AP · setup' : w.mode ? 'STA' : '—';
     wt.className = 'tag' + (w.mode === 'ap' ? ' warn' : w.mode ? ' ok' : '');
     S.wifiMode = w.mode;
+    setTabAlert('settings', w.mode === 'ap' ? 'warn' : null);
+    if (S.tabAuto) { S.tabAuto = false; if (w.mode === 'ap') showTab('settings'); }
     trackJoin(w.join);
     var ssid = $('wifi-ssid');
     if (w.ssid && !ssid.value && document.activeElement !== ssid && w.mode !== 'ap') ssid.placeholder = w.ssid;
@@ -712,6 +803,190 @@
       check.innerHTML = '<span class="ok">✓</span> ctrl runs alone on core 1; Wi-Fi, lwIP, httpd and telemetry stay on core 0.';
       tag.textContent = 'pinning ok'; tag.className = 'tag ok';
     }
+  }
+
+  // Health → Memory & link: the status heap figures plus the telemetry this page receives.
+  function renderLink() {
+    var s = S.status || {}, hp = s.heap || {}, w = s.wifi || {}, L = S.link, live = S.conn === 'live';
+    var rate = get(S.info, 'telemetry.rate_hz', null), age = S.statusAt ? (performance.now() - S.statusAt) / 1000 : null;
+    var low = live && L.fps != null && rate && L.fps < 0.8 * rate;
+    setText('fact-link', live && L.fps != null ? L.fps + ' fps' : '—');
+    kv('dev-kv', [
+      { head: 'memory' },
+      ['internal free', hp.internal_free != null ? bytes(hp.internal_free) : null, '', 'heap_caps_get_free_size(MALLOC_CAP_INTERNAL)'],
+      ['lowest since boot', hp.internal_min != null ? bytes(hp.internal_min) : null, hp.internal_min != null && hp.internal_min < 32768 ? 'bad' : ''],
+      ['psram free', hp.psram_free != null ? bytes(hp.psram_free) : null],
+      { head: 'link' },
+      ['wi-fi', w.mode === 'ap' ? 'access point (setup)' : w.rssi != null ? w.rssi + ' dBm' + (w.ssid ? ' · ' + w.ssid : '') : null, w.mode === 'ap' ? 'accent' : w.rssi != null && w.rssi < -75 ? 'bad' : ''],
+      ['telemetry', live && L.fps != null ? L.fps + (rate ? ' / ' + rate : '') + ' fps' : live ? '…' : 'not connected', low ? 'bad' : live ? 'good' : ''],
+      ['frames lost', live ? L.lost + (L.gaps ? ' in ' + plural(L.gaps, 'gap') : '') : null, L.lost ? 'accent' : ''],
+      ['status age', age != null && live ? age.toFixed(1) + ' s' : null, age != null && age > 2 ? 'bad' : '']
+    ]);
+  }
+
+  // Health → Sensors & drive (rig): encoders with the AS5048A diagnostics, e-stop, drive, zero refs.
+  // Also the calibration line under Live → Calibrate and the "last fault" line over the scene.
+  var ioPrevBad = null;
+  function renderIO(io, cal) {
+    var body = $('io-body'), tag = $('io-tag'), s = S.status || {}, f = s.faults || {};
+    // Last fault (any backend), while not in one
+    var ago = f.ago_s != null ? f.ago_s + (performance.now() - S.statusAt) / 1000 : null;
+    setText('run-last', S.conn === 'live' && f.count && S.run !== 'fault' ? 'last fault: ' + (f.last || '?') + (ago != null ? ' · ' + duration(ago) + ' ago' : '') + (f.count > 1 ? ' · ' + f.count + ' since boot' : '') : '');
+    if (!io) return;
+    if (!io.rig) {
+      if (body.dataset.mode !== 'sim') {
+        body.dataset.mode = 'sim';
+        body.innerHTML = '<p class="panel-hint">The simulated plant has no encoders, e-stop or drive. On the rig backend this card shows the joint encoders (with the magnet diagnostics), the cart encoder, the e-stop input, the drive and the zero references.</p>';
+      }
+      tag.textContent = 'sim'; tag.className = 'tag';
+      S.ioBad = false;
+      return;
+    }
+    body.dataset.mode = 'rig';
+    var problems = [], warns = [], enc = io.enc || [], names = ['joint 1 · θ₁', 'joint 2 · φ = θ₂ − θ₁'];
+    if (io.estop) problems.push('e-stop pressed');
+    if (io.read_errors) problems.push(io.read_errors + ' bad reads in a row');
+    var rows = enc.map(function (e, i) {
+      var mag = 'not read yet', cls = '';
+      if (e.agc != null) {
+        var issues = [];
+        if (e.comp_high) issues.push('field too weak (magnet too far)');
+        if (e.comp_low) issues.push('field too strong (magnet too close)');
+        if (e.cof) issues.push('CORDIC overflow');
+        if (e.ocf === false) issues.push('offset compensation not finished');
+        mag = issues.length ? issues.join(', ') : 'ok';
+        cls = issues.length ? 'bad' : e.agc > 220 || e.agc < 20 ? 'accent' : 'good';
+        mag += ' · AGC ' + e.agc;
+        if (issues.length) problems.push('encoder ' + (i + 1) + ': ' + issues.join(', '));
+        else if (cls === 'accent') warns.push('encoder ' + (i + 1) + ': AGC ' + e.agc + ' near its limit');
+      }
+      var grew = ioPrevBad && e.bad > ioPrevBad[i];
+      if (grew) warns.push('encoder ' + (i + 1) + ': bad reads rising');
+      return '<tr><td>' + esc(names[i] || 'enc ' + (i + 1)) + '</td><td>' + e.raw + '</td><td>' + num(e.raw * 360 / 16384, 1) + '°</td>' +
+        '<td class="' + cls + '">' + esc(mag) + '</td><td class="' + (grew ? 'bad' : e.bad ? 'accent' : '') + '">' + e.bad + '</td></tr>';
+    });
+    ioPrevBad = enc.map(function (e) { return e.bad; });
+    cal = cal || {};
+    if (!cal.angles) problems.push('angles not zeroed');
+    if (!cal.cart) problems.push('cart not zeroed');
+    body.innerHTML =
+      '<div class="table-wrap"><table class="tasks io-table" aria-label="Joint encoders"><thead><tr><th scope="col">encoder</th><th scope="col">raw</th><th scope="col">raw angle</th><th scope="col">magnet</th><th scope="col">bad reads</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>' +
+      '<dl class="kv">' + [
+        ['e-stop', io.estop ? 'PRESSED' : 'released', io.estop ? 'bad' : 'good'],
+        ['drive', io.drive ? 'enabled · ' + Math.round(100 * (io.duty || 0)) + ' % ' + (io.dir < 0 ? '−x' : '+x') : 'disabled (EN low)', io.drive ? 'accent' : ''],
+        ['cart encoder', io.cart_count + ' counts'],
+        { head: 'zero references' },
+        ['angles', cal.angles ? 'set' + (cal.angles_boot ? ' on boot #' + cal.angles_boot : '') + (cal.off1 != null ? ' · ' + num(cal.off1, 4) + ', ' + num(cal.off2, 4) + ' rad' : '') : 'not set', cal.angles ? 'good' : 'bad'],
+        ['cart', cal.cart ? 'set' + (cal.cart_boot ? ' on boot #' + cal.cart_boot : '') + (cal.x_zero != null ? ' · ' + num(cal.x_zero, 4) + ' m' : '') : 'not set', cal.cart ? 'good' : 'bad']
+      ].map(function (r) {
+        return r.head ? '<span class="kv-head">' + esc(r.head) + '</span>' : '<dt>' + esc(r[0]) + '</dt><dd class="' + (r[2] || '') + '">' + esc(r[1]) + '</dd>';
+      }).join('') + '</dl>' +
+      (problems.length || warns.length ? '<p class="check-line"><span class="' + (problems.length ? 'bad' : 'warn') + '">' + (problems.length ? '✕' : '!') + '</span> ' + esc(problems.concat(warns).join('; ')) + '</p>'
+        : '<p class="check-line"><span class="ok">✓</span> Encoders read cleanly, the magnets are in range, and both zero references are set.</p>');
+    tag.textContent = io.estop ? 'e-stop' : problems.length ? (cal.angles && cal.cart ? 'check sensors' : 'not zeroed') : warns.length ? 'watch' : 'ok';
+    tag.className = 'tag ' + (problems.length ? 'bad' : warns.length ? 'warn' : 'ok');
+    S.ioBad = problems.length > 0;
+    // Live → Calibrate
+    var cl = $('cal-line');
+    cl.textContent = cal.angles && cal.cart ? 'Zeroed: angles' + (cal.angles_boot ? ' on boot #' + cal.angles_boot : '') + ', cart' + (cal.cart_boot ? ' on boot #' + cal.cart_boot : '') + '. Re-zero after moving a magnet or the belt.'
+      : (!cal.angles && !cal.cart ? 'Neither zero reference is set' : !cal.angles ? 'The angles are not zeroed' : 'The cart is not zeroed') + ': arming is refused until both are.';
+    cl.className = 'panel-hint' + (cal.angles && cal.cart ? '' : ' bad');
+  }
+
+  function healthAlert() {
+    setTabAlert('health', S.events.newBad || S.ioBad ? 'bad' : S.healthWarn ? 'warn' : null);
+  }
+
+  function clock(ms) {
+    var t = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, x = t % 60;
+    return (h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (x < 10 ? '0' : '') + x;
+  }
+  function renderEvents() {
+    var E = S.events, list = $('events');
+    if (!E.list.length) { list.innerHTML = '<li class="muted">Nothing yet.</li>'; return; }
+    // Newest first, grouped by boot: entries from before a reset (crash, watchdog, brownout,
+    // reboot) survive in the device's RTC memory and explain what happened.
+    var html = [], prevBoot = null, multi = E.list.some(function (e) { return e.boot != null && e.boot !== E.boot; });
+    E.list.slice().reverse().forEach(function (e) {
+      if (multi && e.boot !== prevBoot) {
+        html.push('<li class="ev-sep">' + (e.boot === E.boot ? 'this boot' : 'before the reset') + (e.boot != null ? ' · boot #' + e.boot : '') + '</li>');
+        prevBoot = e.boot;
+      }
+      html.push('<li class="ev ev-' + esc(e.level) + (multi && e.boot !== E.boot ? ' ev-prev' : '') + '"><time title="since that boot">' + clock(e.t_ms) + '</time><span>' + esc(e.msg) + '</span></li>');
+    });
+    list.innerHTML = html.join('');
+    var nBad = E.list.filter(function (e) { return e.level === 'error'; }).length, nWarn = E.list.filter(function (e) { return e.level === 'warn'; }).length;
+    var tag = $('log-tag');
+    tag.textContent = nBad ? plural(nBad, 'error') : nWarn ? plural(nWarn, 'warning') : 'no errors';
+    tag.className = 'tag ' + (nBad ? 'bad' : nWarn ? 'warn' : 'ok');
+    healthAlert();
+  }
+
+  // Settings → Model: does this page's forward pass of the device's blob give the device's command?
+  function renderParity() {
+    var e = $('model-check');
+    if (!S.policy) { e.innerHTML = ''; return; }
+    if (S.parity == null) {
+      e.innerHTML = '<span class="muted">○</span> Browser check: waiting. Arm in AI (no excitation) and this page compares its own forward pass of the blob with the command the device sends.';
+      return;
+    }
+    var fresh = performance.now() - S.parityAt < 2000, ok = S.parity < 0.05;
+    e.innerHTML = (ok ? '<span class="ok">✓</span> The browser\'s forward pass matches the device' : '<span class="bad">✕</span> The browser and the device disagree (blob, observation layout or action pipeline)') +
+      ': mean <span class="nowrap">|ΔF| ' + S.parity.toFixed(3) + ' N</span> over ' + S.parityN.toLocaleString('en-US') + ' ticks' + (fresh ? '.' : ' (last armed run).');
+  }
+
+  // Live → time to target: only while the AI drives; counts up until the goal is reached.
+  function renderReach() {
+    var live = S.conn === 'live', seg = S.seg, f = S.last, G = geom();
+    var show = live && S.run === 'armed' && S.mode === 'ai' && seg && f;
+    $('reach').hidden = !show;
+    if (!show) return;
+    var settled = f.flags & FLAG.SETTLED, val, lbl, state, running = false;
+    if (seg.from && seg.from === S.goal) {
+      val = '—'; lbl = 'holding at ' + S.goal; state = settled ? 'holding' : 'recovering';
+    } else if (seg.reach != null) {
+      val = seg.reach.toFixed(2); lbl = (seg.from ? seg.from + ' ' : '') + '→ ' + S.goal + ' (s)'; state = settled ? 'holding' : 'knocked out · recovering';
+    } else {
+      val = ((f.tick - seg.tick0) * G.dt).toFixed(1); lbl = (seg.from ? seg.from + ' ' : '') + '→ ' + S.goal + ' (s)'; state = 'on its way'; running = true;
+    }
+    setText('reach-val', val); setText('reach-lbl', lbl); setText('reach-state', state);
+    $('reach-val').classList.toggle('running', running);
+  }
+
+  // Live → State: estimate / encoder readings / true state, refreshed ~10 Hz.
+  var roKey = '';
+  function renderReadout() {
+    var f = S.last, G = geom(), n = G.n, truth = !!(f && (f.flags & FLAG.TRUTH)), body = $('ro-rows');
+    var key = n + '|' + truth;
+    if (key !== roKey) {
+      roKey = key;
+      var sub = '₁₂₃₄', rows = [['x', 'm'], ['ẋ', 'm/s']];
+      for (var k = 0; k < n; k++) rows.push(['θ' + sub[k], '°'], ['θ̇' + sub[k], '°/s']);
+      body.innerHTML = rows.map(function (r) {
+        return '<tr><th scope="row">' + r[0] + ' <span>' + r[1] + '</span></th><td></td><td></td><td class="ro-true"></td></tr>';
+      }).join('');
+      $('ro-true-h').hidden = !truth;
+      body.querySelectorAll('.ro-true').forEach(function (td) { td.hidden = !truth; });
+    }
+    var cells = body.querySelectorAll('td'), D = 180 / Math.PI;
+    function put(i, v, d) { var c = cells[i]; if (c) { var t = v == null || !isFinite(v) ? '—' : num(v, d); if (c.textContent !== t) c.textContent = t; } }
+    // Rows: x, ẋ, then θₖ (°, as the plot lanes) and θ̇ₖ (°/s); meas holds positions only: [x, θ₁, …].
+    function val(v, r) { return r < 2 ? v : r % 2 === 0 ? lane(v) : v * D; }
+    for (var r = 0; r < 2 + 2 * n; r++) {
+      var ang = r >= 2 && r % 2 === 0, d = r === 0 ? 3 : r === 1 ? 2 : ang ? 1 : 0;
+      var mi = r === 0 ? 0 : ang ? 1 + (r - 2) / 2 : -1;
+      put(3 * r, f ? val(f.est[r], r) : null, d);
+      put(3 * r + 1, f && mi >= 0 ? val(f.meas[mi], r) : null, d);
+      put(3 * r + 2, f && truth ? val(f.truth[r], r) : null, d);
+    }
+    setText('ro-tick', f ? 'tick ' + f.tick : '');
+    var margin = f ? G.x_lim - Math.abs(f.est[0]) : null;
+    kv('ro-kv', [
+      ['force cmd', f ? signed(f.cmd, 2) + ' N' : null],
+      ['force applied', f ? signed(f.applied, 2) + ' N' : null],
+      ['rail margin', margin != null ? num(margin, 3) + ' m' : null, margin != null && margin < 0.1 * G.x_lim ? 'bad' : ''],
+      ['settled', f ? (f.flags & FLAG.SETTLED ? 'yes · at ' + (S.goal || '?') : 'no') : null, f && (f.flags & FLAG.SETTLED) ? 'good' : '']
+    ]);
   }
 
   /* ---- Controls ---- */
@@ -777,13 +1052,20 @@
     if (!force && key === ctrlKey) return;
     ctrlKey = key;
 
-    // Arm
-    var arm = $('arm');
-    arm.classList.toggle('armed', armed);
-    arm.classList.toggle('fault', run === 'fault');
-    arm.setAttribute('aria-pressed', armed ? 'true' : 'false');
-    arm.disabled = !live || run === 'maint' || run == null;
-    setText('arm-label', armed ? 'Armed · disarm' : run === 'fault' ? 'Re-arm' : run === 'maint' ? 'Writing flash…' : 'Arm');
+    // Arm (Live and Record carry one each)
+    document.querySelectorAll('[data-arm]').forEach(function (arm) {
+      arm.classList.toggle('armed', armed);
+      arm.classList.toggle('fault', run === 'fault');
+      arm.setAttribute('aria-pressed', armed ? 'true' : 'false');
+      arm.disabled = !live || run === 'maint' || run == null;
+      arm.querySelector('.arm-label').textContent = armed ? 'Armed · disarm' : run === 'fault' ? 'Re-arm' : run === 'maint' ? 'Writing flash…' : 'Arm';
+    });
+    // Header: the controller state, on every tab
+    var rc = $('run-chip');
+    rc.dataset.run = live ? run || '' : '';
+    setText('run-chip-text', !live ? '—' : (run || '—').toUpperCase() + (run === 'fault' && S.fault ? ' · ' + S.fault : ''));
+    rc.title = armed ? 'Armed: click (or Esc) to disarm' : run === 'fault' ? 'Fault: ' + (S.fault || 'tripped') + '. Re-arm on Live.' : 'Controller state. Esc disarms from any tab.';
+    setText('rec-ctrl-note', !live ? '' : run === 'fault' ? 'fault · ' + (S.fault || 'tripped') : (S.mode === 'manual' ? 'Manual · PD holds the cart at ' + signed(S.xref, 2) + ' m' : 'AI → ' + (S.goal || '?')) + (armed ? '' : ' · not driving'));
 
     // Mode
     document.querySelectorAll('.mode-btn[data-mode]').forEach(function (b) {
@@ -828,14 +1110,17 @@
     }
     var se = $('run-sub');
     if (se.innerHTML !== sub) se.innerHTML = sub;
-    var seg = S.seg, settled = S.last && (S.last.flags & FLAG.SETTLED);
-    setText('reach-val', seg && seg.reach != null ? seg.reach.toFixed(2) : '-');
-    setText('reach-lbl', (seg && seg.from ? seg.from + ' ' : '') + '→ ' + (S.goal || '?') + ' time (s)');
-    setText('reach-state', !live ? '' : settled ? 'holding' : seg && seg.reach != null ? 'knocked out · recovering' : armed && S.mode === 'ai' ? 'on its way' : '');
+    renderReach();
   }
 
   // Arm / Disarm. Esc disarms from anywhere on the page.
-  $('arm').addEventListener('click', function () { send({ arm: S.run !== 'armed' }).catch(function () {}); });
+  document.querySelectorAll('[data-arm]').forEach(function (b) {
+    b.addEventListener('click', function () { send({ arm: S.run !== 'armed' }).catch(function () {}); });
+  });
+  $('run-chip').addEventListener('click', function () {
+    if (S.run === 'armed') { send({ arm: false }).catch(function () {}); flash('cmd-msg', 'Disarmed.', 'good', 2000); }
+    else if (S.tab !== 'live') location.hash = 'live';
+  });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape' && S.run === 'armed') { send({ arm: false }).catch(function () {}); flash('cmd-msg', 'Disarmed (Esc).', 'good', 2000); }
   });
@@ -1066,23 +1351,27 @@
     }
 
     var rows = [{ label: 'x', value: st[0], unit: 'm' }, { label: 'ẋ', value: st[1], unit: 'm/s' }];
-    for (var li = 0; li < G.n; li++) rows.push({ label: 'θ' + (li + 1), value: wrapAngle(st[2 + 2 * li]) * 180 / Math.PI, unit: '°' });
+    for (var li = 0; li < G.n; li++) rows.push({ label: 'θ' + (li + 1), value: lane(st[2 + 2 * li]), unit: '°' });
     rows.push({ label: 'F', value: f.applied, unit: 'N' });
     drawStateBox(ctx, W, H, rows);
   }
 
   // Hover: a crosshair snaps to the nearest sample; the margin values follow it.
-  var plotHoverX = null;
-  plotCv.addEventListener('pointermove', function (e) { plotHoverX = e.clientX - plotCv.getBoundingClientRect().left; });
-  plotCv.addEventListener('pointerleave', function () { plotHoverX = null; });
+  var recPlotCv = $('rec-plot');
+  [plotCv, recPlotCv].forEach(function (cv) {
+    cv.hoverX = null;
+    cv.addEventListener('pointermove', function (e) { cv.hoverX = e.clientX - cv.getBoundingClientRect().left; });
+    cv.addEventListener('pointerleave', function () { cv.hoverX = null; });
+  });
 
-  function drawPlot() {
-    var c = sizeCanvas(plotCv), ctx = c.ctx, W = c.W, H = c.H, G = geom();
+  // Live: x, every θ and F. Record (compact): x and F, what an excitation does to the cart.
+  function drawPlot(cv, compact) {
+    var c = sizeCanvas(cv), ctx = c.ctx, W = c.W, H = c.H, G = geom(), plotHoverX = cv.hoverX;
     var bg = cssVar('--bg'), border = cssVar('--border'), muted = cssVar('--text-muted'), text = cssVar('--text'), mono = cssVar('--mono');
     var colors = [cssVar('--viz-1'), cssVar('--viz-2'), cssVar('--viz-3'), cssVar('--viz-4')];
     ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
     var lanes = [{ label: 'x (m)', lo: -G.x_lim, hi: G.x_lim, d: 2, get: function (s) { return s.x; }, ref: function (s) { return s.xr; } }];
-    for (var k = 0; k < G.n; k++) (function (k) { lanes.push({ label: 'θ' + '₁₂₃₄'[k] + ' (°)', lo: -90, hi: 270, d: 0, wrap: true, get: function (s) { return s.th[k]; } }); })(k);
+    for (var k = 0; k < G.n && !compact; k++) (function (k) { lanes.push({ label: 'θ' + '₁₂₃₄'[k] + ' (°)', lo: -90, hi: 270, d: 0, wrap: true, get: function (s) { return s.th[k]; } }); })(k);
     lanes.push({ label: 'F (N)', lo: -G.fmax, hi: G.fmax, d: 1, get: function (s) { return s.cmd; }, second: function (s) { return s.applied; } });
     var PAD_L = 74, PAD_R = 10, PAD_T = 4, PAD_B = 16;
     var rowH = (H - PAD_T - PAD_B) / lanes.length, pw = W - PAD_L - PAD_R;
@@ -1127,7 +1416,7 @@
       var lw = ctx.measureText(s.label).width;
       ctx.fillStyle = col; ctx.fillRect(PAD_L - 6 - lw - 12, mid - 8.5, 8, 3);
       ctx.fillStyle = muted; ctx.fillText(s.label, PAD_L - 6, mid - 7);
-      ctx.fillStyle = text; ctx.fillText(num(s.wrap ? wrapAngle(cur * Math.PI / 180) * 180 / Math.PI : cur, s.d), PAD_L - 6, mid + 7);
+      ctx.fillStyle = text; ctx.fillText(num(cur, s.d), PAD_L - 6, mid + 7);
       if (s.second && n) {
         ctx.fillStyle = muted; ctx.textAlign = 'right';
         ctx.fillText('cmd solid · applied dashed', W - PAD_R - 4, yTop + 9);
@@ -1205,7 +1494,7 @@
         ctx.fillText(bytes(S.model.got) + (S.model.total ? ' / ' + bytes(S.model.total) : ''), msgX, H / 2 + 24);
       } else if (st === 'none') {
         ctx.fillText('No model on the device', msgX, H / 2 - 6);
-        ctx.font = '11px ' + font; ctx.fillText('Export one with task export-firmware and drop the .ncpm on Update below.', msgX, H / 2 + 14);
+        ctx.font = '11px ' + font; ctx.fillText('Export one with task export-firmware and drop the .ncpm on Settings → Update.', msgX, H / 2 + 14);
       } else if (st === 'error') {
         ctx.fillText('Could not load the network: ' + S.model.error, msgX, H / 2);
       } else {
@@ -1314,18 +1603,27 @@
         if (!h.action_history || !G.slew) pred = null;
         else pred = clamp(f.obs[h.hist_at] * h.force_max + clamp(a / h.force_max, -1, 1) * h.force_slew * h.dt, -h.force_max, h.force_max);
       } else pred = clamp(a, -h.force_max, h.force_max);
-      if (pred != null) { var e = Math.abs(pred - f.cmd); S.parity = S.parity == null ? e : 0.95 * S.parity + 0.05 * e; }
-    } else S.parity = null;
+      if (pred != null) {
+        var e = Math.abs(pred - f.cmd);
+        S.parity = S.parity == null ? e : 0.95 * S.parity + 0.05 * e;
+        S.parityN++; S.parityAt = performance.now();
+      }
+    }
     if (now - netWindow > 1000) { S.netFps = netCount; netCount = 0; netWindow = now; renderNetMeta(); }
     return true;
   }
 
-  var lastStatusRender = 0;
+  var lastStatusRender = 0, lastReadout = 0;
   function frame(now) {
-    drawScene();
-    drawPlot();
-    drawSpark();
-    if (runNet(now) || !S.policy || now - lastNetAt > 500) drawNet();
+    var ran = runNet(now);   // every tab: the parity check in Settings → Model needs it
+    if (S.tab === 'live') {
+      drawScene();
+      drawPlot(plotCv, false);
+      if (now - lastReadout > 100) { lastReadout = now; renderReadout(); renderReach(); }
+      if (ran || !S.policy || now - lastNetAt > 500) drawNet();
+    }
+    if (S.tab === 'record') drawPlot(recPlotCv, true);
+    if (S.tab === 'health') drawSpark();
     if (S.model.state === 'loading' && now - lastStatusRender > 200) { lastStatusRender = now; renderNetMeta(); }
     requestAnimationFrame(frame);
   }
@@ -1587,10 +1885,35 @@
         }, 35000);
       }).catch(function (err) { flash('wifi-msg', err.message, 'bad'); });
   });
+  // Hostname: saved to NVS and applied to mDNS at once (this page stays on its current address).
+  $('host-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = $('host-name').value.trim().toLowerCase().replace(/\.local$/, '');
+    if (!/^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/.test(name)) { flash('host-msg', '1–32 of a–z, 0–9 and -, not starting or ending with -.', 'bad'); return; }
+    fetchJSON('api/hostname', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hostname: name }) }, 5000)
+      .then(function (j) {
+        $('host-name').value = '';
+        flash('host-msg', 'Renamed: http://' + (j && j.hostname || name) + '.local/ from now on (this page keeps working where it is).', 'good', 8000);
+        loadInfo();
+      }).catch(function (err) { flash('host-msg', err.message, 'bad'); });
+  });
+  // Forget: the device erases the network and reboots into its setup access point.
+  $('wifi-forget').addEventListener('click', function () {
+    if (S.run === 'armed') { flash('host-msg', 'Disarm first.', 'bad'); return; }
+    var ap = 'cartpole-XXXX';
+    if (!window.confirm('Forget the saved Wi-Fi network?\n\nThe device reboots into its setup access point (' + ap + ', http://192.168.4.1/) and this page loses it. Join that access point to set a new network.')) return;
+    fetchJSON('api/wifi/forget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 4000).then(function () {
+      flash('host-msg', 'Forgotten. The device is rebooting into its access point ' + ap + ': join it and open http://192.168.4.1/.', 'good', 0);
+      S.rebooting = { from: get(S.info, 'fw.version', ''), to: get(S.info, 'fw.version', ''), t0: performance.now() };
+      setConn('rebooting');
+      waitForReboot();
+    }).catch(function (err) { flash('host-msg', err.message, 'bad'); });
+  });
+
   $('reboot').addEventListener('click', function () {
     if (S.run === 'armed') { flash('cmd-msg', 'Disarm before rebooting.', 'bad'); return; }
     if (!window.confirm('Reboot the device?')) return;
-    fetchJSON('api/reboot', { method: 'POST' }, 4000).then(function () {
+    fetchJSON('api/reboot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 4000).then(function () {
       S.rebooting = { from: get(S.info, 'fw.version', ''), to: get(S.info, 'fw.version', ''), t0: performance.now() };
       setConn('rebooting');
       waitForReboot();
@@ -1719,6 +2042,56 @@
     }).catch(function (e) { flash('rec-msg', 'download: ' + e.message, 'bad'); });
   });
   pickPreset(PRESETS[0]);
+
+  /* ---- Tabs (Live / Health / Record / Settings) ----
+     The URL hash selects a tab (#settings), the last choice is remembered, and a device in setup
+     mode opens Settings on first load so the Wi-Fi form is the first thing seen. */
+  var TABS = ['live', 'health', 'record', 'settings'];
+  function tabFromHash() {
+    var h = (location.hash || '').replace('#', '');
+    return TABS.indexOf(h) >= 0 ? h : null;
+  }
+  function showTab(name) {
+    if (TABS.indexOf(name) < 0) name = 'live';
+    S.tab = name;
+    TABS.forEach(function (t) {
+      var on = t === name, b = $('tab-btn-' + t);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
+      $('tab-' + t).hidden = !on;
+    });
+    try { localStorage.setItem('tab', name); } catch (e) {}
+    if (name === 'health' && S.events.newBad) {
+      var bad = S.events.list.filter(function (e) { return e.level === 'error'; });
+      S.events.seenBad = bad.length ? bad[bad.length - 1].seq : 0;
+      S.events.newBad = false;
+      healthAlert();
+    }
+  }
+  function setTabAlert(name, kind) {
+    var b = $('tab-btn-' + name);
+    if (!b) return;
+    if (kind) b.setAttribute('data-alert', kind); else b.removeAttribute('data-alert');
+  }
+  TABS.forEach(function (t, i) {
+    var b = $('tab-btn-' + t);
+    b.addEventListener('click', function () { if (location.hash !== '#' + t) location.hash = t; else showTab(t); });
+    b.addEventListener('keydown', function (e) {
+      var j = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : -1;
+      if (j < 0) return;
+      e.preventDefault();
+      j = (j + TABS.length) % TABS.length;
+      location.hash = TABS[j];
+      $('tab-btn-' + TABS[j]).focus();
+    });
+  });
+  window.addEventListener('hashchange', function () { var t = tabFromHash(); if (t) showTab(t); });
+  (function () {
+    var t = tabFromHash(), stored = null;
+    if (!t) { try { stored = localStorage.getItem('tab'); } catch (e) {} }
+    S.tabAuto = !t && TABS.indexOf(stored) < 0;
+    showTab(t || (TABS.indexOf(stored) >= 0 ? stored : 'live'));
+  })();
 
   /* ---- Boot ---- */
   buildGoalButtons();

@@ -1,0 +1,4 @@
+# Layered on sdkconfig.defaults to build the rig backend (CI compiles it on every push;
+# locally: task fw-build-rig). Pins, encoder directions, counts and the PWM full-scale force
+# keep their Kconfig defaults here: set yours with menuconfig (n-cartpole -> Rig hardware).
+CONFIG_NCP_BACKEND_RIG=y
