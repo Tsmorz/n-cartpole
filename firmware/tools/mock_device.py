@@ -374,6 +374,7 @@ class Device:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.rig = bool(args.rig)
+        self.strict_budget = bool(getattr(args, "strict_budget", False))
         self.boot = time.monotonic()
         self.rng = np.random.default_rng(0)
         self.cmds: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -637,7 +638,7 @@ class Device:
         if key == "arm" and val:
             if self.run == RUN_MAINT:
                 return "an upload is writing flash"
-            if self.rig and not self.budget_ok:
+            if self.rig and self.strict_budget and not self.budget_ok:
                 return "loop budget exceeded: the model is too slow for the rig"
             if self.mode == MODE_AI and not self.can_ai():
                 return "no model on the device"
@@ -1002,7 +1003,12 @@ class Device:
     # -- status --
     @property
     def budget_ok(self) -> bool:
-        """Execution within 80 % of the period (over the last status window)."""
+        """Execution within 80 % of the period (over the last status window).
+
+        This is the mock's own Python loop, so it measures the machine running the mock, not the
+        device: a slow or shared CI runner can exceed the budget. It is only reported by default;
+        ``--strict-budget`` also makes it refuse to arm the rig, as the firmware does.
+        """
         return self._last_loop.get("exec_avg_us", 0) <= 0.8 * self.p.dt * 1e6
 
     _last_loop: dict[str, Any] = {}  # noqa: RUF012  (replaced, never mutated)
@@ -1653,6 +1659,12 @@ def main() -> None:
         "--uncalibrated",
         action="store_true",
         help="rig: the zero references are not set yet (arming is refused)",
+    )
+    ap.add_argument(
+        "--strict-budget",
+        action="store_true",
+        help="rig: refuse to arm while this process's own loop exceeds 80 %% of the period "
+        "(depends on the machine, so off by default and in the tests)",
     )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
