@@ -210,6 +210,12 @@ static void build_status(const ctrl_status_t *st, const model_strs_t *ms) {
     cJSON_AddStringToObject(wifi, "ssid", ni.ssid);
     cJSON_AddStringToObject(wifi, "ip", ni.ip);
     cJSON_AddNumberToObject(wifi, "rssi", ni.rssi);
+    static const char *const join_names[] = {"idle", "connecting", "ok", "failed"};
+    cJSON *join = cJSON_AddObjectToObject(wifi, "join");
+    cJSON_AddStringToObject(join, "state", join_names[ni.join]);
+    cJSON_AddStringToObject(join, "ssid", ni.join_ssid);
+    cJSON_AddStringToObject(join, "ip", ni.join_ip);
+    cJSON_AddStringToObject(join, "error", ni.join_error);
 
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     add_tasks(root);

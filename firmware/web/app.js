@@ -673,6 +673,8 @@
     var wt = $('wifi-tag');
     wt.textContent = w.mode === 'ap' ? 'AP · setup' : w.mode ? 'STA' : '—';
     wt.className = 'tag' + (w.mode === 'ap' ? ' warn' : w.mode ? ' ok' : '');
+    S.wifiMode = w.mode;
+    trackJoin(w.join);
     var ssid = $('wifi-ssid');
     if (w.ssid && !ssid.value && document.activeElement !== ssid && w.mode !== 'ap') ssid.placeholder = w.ssid;
   }
@@ -1505,8 +1507,6 @@
       renderPending(now === r.to
         ? 'Back online on <b>v' + esc(now) + '</b> (was v' + esc(r.from) + ')' + (state === 'pending' ? ' · it marks itself valid after 10 s of healthy running.' : '.')
         : 'Back online, but still on v' + esc(now) + ' — the new image rolled back. Check the serial log.', now === r.to ? 'good' : 'bad');
-    } else if (r.wifi) {
-      flash('wifi-msg', 'Back online.', 'good');
     }
     if (S.conn === 'rebooting') setConn('reconnecting');
   }
@@ -1549,19 +1549,42 @@
   }
 
   /* ---- Wi-Fi and reboot ---- */
+  // Progress of a join this page started: the device reports it in status.wifi.join. When the
+  // device leaves its setup access point (or switches channel) this page loses it, so a timer
+  // covers the case where the result never arrives.
+  function trackJoin(j) {
+    if (!S.joinWatch || !j) return;
+    var host = (get(S.info, 'hostname', null) || 'cartpole') + '.local';
+    if (j.state === 'connecting') {
+      flash('wifi-msg', 'Joining "' + S.joinWatch + '"… (up to 20 s)', '', 0);
+    } else if (j.state === 'ok') {
+      flash('wifi-msg', 'Joined "' + j.ssid + '" at ' + j.ip + '. Put this computer back on that network, then open http://' + host + '/ or http://' + j.ip + '/', 'good', 0);
+      S.joinWatch = null;
+      $('wifi-save').disabled = false;
+    } else if (j.state === 'failed') {
+      flash('wifi-msg', 'Could not join "' + S.joinWatch + '": ' + (j.error || 'unknown error') + '. Nothing was saved.', 'bad', 0);
+      S.joinWatch = null;
+      $('wifi-save').disabled = false;
+    }
+  }
   $('wifi-form').addEventListener('submit', function (e) {
     e.preventDefault();
     var ssid = $('wifi-ssid').value.trim(), pass = $('wifi-pass').value;
     if (!ssid) return;
-    if (S.run === 'armed') { flash('wifi-msg', 'Disarm first: the device reboots to join the network.', 'bad'); return; }
-    if (!window.confirm('Join "' + ssid + '"?\n\nThe device saves this and reboots. If it can\'t join within 15 s it opens its own access point cartpole-XXXX (192.168.4.1). This page will lose the device if it moves to another network.')) return;
+    if (S.run === 'armed') { flash('wifi-msg', 'Disarm first: saving the network writes flash.', 'bad'); return; }
+    if (S.wifiMode !== 'ap' && !window.confirm('Join "' + ssid + '"?\n\nIf it works the device moves to that network and this page loses it; if not, it stays on the current one.')) return;
     fetchJSON('api/wifi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ssid: ssid, password: pass }) }, 5000)
       .then(function () {
-        flash('wifi-msg', 'Saved. Rebooting to join ' + ssid + '…', 'good', 0);
+        S.joinWatch = ssid;
+        $('wifi-save').disabled = true;
         $('wifi-pass').value = '';
-        S.rebooting = { from: get(S.info, 'fw.version', ''), to: get(S.info, 'fw.version', ''), t0: performance.now(), wifi: true };
-        setConn('rebooting');
-        waitForReboot();
+        flash('wifi-msg', 'Joining "' + ssid + '"…', '', 0);
+        setTimeout(function () {
+          if (S.joinWatch !== ssid) return;
+          S.joinWatch = null;
+          $('wifi-save').disabled = false;
+          flash('wifi-msg', 'Lost contact with the device — it probably joined "' + ssid + '". Put this computer back on that network and open http://' + ((get(S.info, 'hostname', null) || 'cartpole') + '.local') + '/ (or look up its IP in your router).', 'good', 0);
+        }, 35000);
       }).catch(function (err) { flash('wifi-msg', err.message, 'bad'); });
   });
   $('reboot').addEventListener('click', function () {

@@ -112,8 +112,17 @@ All JSON responses carry `Content-Type: application/json`. Errors: HTTP 4xx/5xx 
 | GET | `/api/model` | the stored `.ncpm` blob (`application/octet-stream`), 404 if none |
 | POST | `/api/model` | raw `.ncpm` body; validated (header + CRC), stored, hot-reloaded → `{"ok": true, "label": "..."}`; 409 if armed |
 | POST | `/api/ota` | raw app image (`n-cartpole-fw-<ver>.bin`); first byte 0xE9; app descriptor project name must be `n_cartpole_fw` → `{"ok": true, "version": "..."}`, then reboots after 1 s; 409 if armed |
-| POST | `/api/wifi` | `{"ssid": "...", "password": "..."}` → saved to NVS, reboots |
+| POST | `/api/wifi` | `{"ssid": "...", "password": "..."}` → `{"ok": true}` at once; the join runs in the background (see below), no reboot; 409 if armed, still starting or a join is running |
 | POST | `/api/reboot` | → `{"ok": true}`, reboots after 0.5 s |
+
+Joining a network (`POST /api/wifi`, `net_join_start` in `net.c`): a `wifi_join` task on core 0
+sets the station config and connects, waiting up to 20 s for an IP. From the setup access point
+it switches to AP+STA so the AP stays up (the AP follows the router's channel, so a client may
+drop and re-associate). On success the credentials are written to NVS (only then), `join.state`
+is `ok` with the new `join.ip`, and after a grace period (20 s from the AP, 5 s from a station)
+the AP is dropped and the station kept: no reboot. On failure nothing is saved, `join.state` is
+`failed` with `join.error` ("network not found", "authentication failed (wrong password?)", ...)
+until the next attempt, and the device returns to the AP (or reconnects the previous network).
 | GET (upgrade) | `/ws` | WebSocket: binary telemetry (ncp_telemetry.h) + text status JSON at 2 Hz |
 
 Commands (`POST /api/cmd`, one key per request):
@@ -163,7 +172,8 @@ Status (WS text message and `/api/status`):
            "policy_avg_us": 600, "est_avg_us": 200, "misses": 0, "rt_factor": 1.0,
            "budget_ok": true},
   "heap": {"internal_free": 180000, "internal_min": 150000, "psram_free": 3800000},
-  "wifi": {"mode": "sta" | "ap", "ssid": "...", "ip": "192.168.1.40", "rssi": -52},
+  "wifi": {"mode": "sta" | "ap", "ssid": "...", "ip": "192.168.1.40", "rssi": -52,
+           "join": {"state": "idle" | "connecting" | "ok" | "failed", "ssid": "...", "ip": "...", "error": "..."}},
   "uptime_s": 1234,
   "cores": [{"id": 0, "load": 12.5}, {"id": 1, "load": 31.0}],
   "tasks": [{"name": "ctrl", "core": 1, "prio": 22, "cpu": 30.9, "stack_free": 2100}, ...]

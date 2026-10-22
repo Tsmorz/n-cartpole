@@ -273,8 +273,8 @@
             <form class="form" id="wifi-form" autocomplete="off">
               <div class="field"><label for="wifi-ssid">network (SSID)</label><input id="wifi-ssid" name="ssid" maxlength="32" required spellcheck="false" autocapitalize="off"></div>
               <div class="field"><label for="wifi-pass">password</label><input id="wifi-pass" name="password" type="password" maxlength="64" autocapitalize="off"></div>
-              <p class="panel-hint">Saved to flash; the device reboots to join it. If it can't, it opens its own access point <code>cartpole-XXXX</code> at <code>192.168.4.1</code>.</p>
-              <button class="sim-btn primary" type="submit" id="wifi-save">Save &amp; reboot</button>
+              <p class="panel-hint">The device tries the network first and saves it only if it joins (no reboot). In setup mode its access point <code>cartpole-XXXX</code> stays up for a moment so you can read the result. A 2.4&nbsp;GHz network is required.</p>
+              <button class="sim-btn primary" type="submit" id="wifi-save">Join network</button>
               <p class="panel-msg" id="wifi-msg" aria-live="polite"></p>
             </form>
           </div>

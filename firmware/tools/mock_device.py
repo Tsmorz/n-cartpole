@@ -384,7 +384,10 @@ class Device:
         self.built = time.strftime("%b %d %Y %H:%M:%S")
         self.ota_running, self.ota_next, self.ota_state = "ota_0", "ota_1", "valid"
         self.pending_until = 0.0
-        self.wifi = {"mode": "sta", "ssid": "workshop", "ip": args.host, "rssi": -52}
+        self.wifi = {
+            "mode": "sta", "ssid": "workshop", "ip": args.host, "rssi": -52,
+            "join": {"state": "idle", "ssid": "", "ip": "", "error": ""},
+        }
 
         self._load_plant(Path(args.checkpoint))
         self.blob: bytes | None = None
@@ -1068,6 +1071,23 @@ class Device:
                         if c in self.clients:
                             self.clients.remove(c)
 
+    # -- joining a Wi-Fi network (no reboot; an SSID containing "wrong" fails) --
+    def start_join(self, ssid: str, password: str) -> None:
+        join = self.wifi["join"]
+        join.update(state="connecting", ssid=ssid, ip="", error="")
+
+        def go() -> None:
+            time.sleep(2.0)
+            if "wrong" in ssid.lower():
+                join.update(state="failed", error="authentication failed (wrong password?)")
+                return
+            join.update(state="ok", ip="192.168.1.77")
+            time.sleep(5.0)
+            self.wifi.update(mode="sta", ssid=ssid, ip="192.168.1.77")
+            join.update(state="idle")
+
+        threading.Thread(target=go, daemon=True).start()
+
     # -- uploads and reboots --
     def reboot(self, delay: float, new_version: str | None = None) -> None:
         """Drop every connection, stay dark for REBOOT_S, come back fresh."""
@@ -1342,8 +1362,7 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
                     self._err(400, "SSID must be 1-32 characters")
                     return
                 self._json({"ok": True})
-                dev.wifi["ssid"] = ssid
-                dev.reboot(0.5)
+                dev.start_join(ssid, str(w.get("password", "")))
             elif path == "/api/reboot":
                 self._json({"ok": True})
                 dev.reboot(0.5)

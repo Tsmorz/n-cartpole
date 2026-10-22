@@ -20,6 +20,7 @@
 #include "freertos/task.h"
 #include "hal.h"
 #include "model_store.h"
+#include "net.h"
 #include "ota.h"
 #include "record.h"
 #include "sdkconfig.h"
@@ -517,17 +518,22 @@ static esp_err_t wifi_post(httpd_req_t *req) {
         why = "ssid must be 1-32 characters";
     } else if (strlen(p) > 64 || (p[0] != '\0' && strlen(p) < 8)) {
         why = "password must be empty or 8-64 characters";
-    } else if (settings_save_wifi(s, p) != ESP_OK) {
-        why = "could not save to NVS";
     }
+    esp_err_t started = why == NULL ? net_join_start(s, p) : ESP_OK; /* copies s and p */
     cJSON_Delete(j);
     if (why != NULL) {
         return send_error(req, "400 Bad Request", why);
     }
-    ESP_LOGI(TAG, "Wi-Fi credentials saved; rebooting");
-    esp_err_t err = send_ok(req);
-    ota_reboot_later(1000);
-    return err;
+    if (started == ESP_ERR_INVALID_STATE) {
+        return send_error(req, "409 Conflict", "the network is still starting or a join is running");
+    }
+    if (started != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not start the join");
+    }
+    /* The join runs in the background: poll "wifi.join" in the status JSON. Credentials are
+     * stored only if it works, and there is no reboot. */
+    ESP_LOGI(TAG, "joining a new Wi-Fi network");
+    return send_ok(req);
 }
 
 static esp_err_t reboot_post(httpd_req_t *req) {

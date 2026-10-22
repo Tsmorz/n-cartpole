@@ -20,11 +20,15 @@ N16R8). **Framework:** ESP-IDF v5.3.1.
 3. **First flash over USB** (merged factory image at 0x0):
    `task fw-flash -- /dev/cu.usbserial-XXXX [dist/firmware/n-cartpole-fw-0.2.0-factory.bin]`.
    Watch the log with `task fw-monitor -- /dev/cu.usbserial-XXXX`.
-4. **Connect:** with no Wi-Fi credentials (or if the network is not found within
+4. **Connect:** with no Wi-Fi credentials (or if the saved network is not found within
    15 s) the device opens an access point `cartpole-XXXX` (open); browse to
-   `http://192.168.4.1/` and enter your network under Wi-Fi (`POST /api/wifi`; the
-   device reboots). Afterwards it is at `http://cartpole.local/` (mDNS) or the IP
-   printed on the serial console.
+   `http://192.168.4.1/` and enter your 2.4 GHz network under Wi-Fi. The device tries it
+   with the access point still up and **saves it only if it joins** (no reboot); the page
+   shows the result and the new address, or why it failed (wrong password, not found). The
+   access point closes about 20 s after a successful join, so put your computer back on
+   your network and open `http://cartpole.local/` (mDNS) or the IP shown (also on the
+   serial console). The channel switch can drop the page early; the page then tells you
+   the device probably joined.
 5. **Load the model:** drag the `.ncpm` onto the dashboard (no reboot), or flash it over
    USB with `task fw-flash-model -- <port> model.ncpm` (partition `model` at 0x620000).
 6. **Firmware updates:** drag `n-cartpole-fw-<ver>.bin` from a release onto the
