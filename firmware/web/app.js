@@ -886,7 +886,7 @@
     kv('dev-kv', [
       { head: 'memory' },
       ['internal free', hp.internal_free != null ? bytes(hp.internal_free) : null, '', 'heap_caps_get_free_size(MALLOC_CAP_INTERNAL)'],
-      ['lowest since boot', hp.internal_min != null ? bytes(hp.internal_min) : null, hp.internal_min != null && hp.internal_min < 32768 ? 'bad' : ''],
+      ['lowest since boot', hp.internal_min != null ? bytes(hp.internal_min) : null, hp.internal_min != null && hp.internal_min < 16384 ? 'bad' : '', 'Below ~16 KB, Wi-Fi and HTTP allocations start to fail'],
       ['psram free', hp.psram_free != null ? bytes(hp.psram_free) : null],
       { head: 'link' },
       ['wi-fi', w.mode === 'ap' ? 'access point (setup)' : w.rssi != null ? w.rssi + ' dBm' + (w.ssid ? ' · ' + w.ssid : '') : null, w.mode === 'ap' ? 'accent' : w.rssi != null && w.rssi < -75 ? 'bad' : ''],

@@ -24,6 +24,8 @@ static const char *TAG = "event";
 
 #define EV_N 40 /* entries kept (RTC memory is small: ~3.7 KB here) */
 #define EV_MSG 72
+/* One entry as JSON at most: fields (~110 B) + the message with every byte escaped (\u00XX). */
+#define EVENT_JSON_MAX (110 + 6 * EV_MSG)
 #define EV_MAGIC 0x4E435032u /* "NCP2" (v2 entries carry unix time) */
 #define UNIX_VALID 1700000000u /* Nov 2023: anything earlier means the clock was never set */
 
@@ -118,36 +120,65 @@ uint32_t events_unix_now(void) {
     return now >= (time_t)UNIX_VALID ? (uint32_t)now : 0;
 }
 
-cJSON *events_json(void) {
+/* JSON string body: quote, backslash and control characters escaped. */
+static size_t put_escaped(char *out, size_t room, const char *s) {
+    size_t n = 0;
+    for (; *s != '\0'; s++) {
+        unsigned char c = (unsigned char)*s;
+        char tmp[8];
+        const char *rep = tmp;
+        size_t len;
+        if (c == '"' || c == '\\') {
+            tmp[0] = '\\';
+            tmp[1] = (char)c;
+            len = 2;
+        } else if (c < 0x20) {
+            len = (size_t)snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+        } else {
+            tmp[0] = (char)c;
+            len = 1;
+        }
+        if (n + len >= room) {
+            break;
+        }
+        memcpy(out + n, rep, len);
+        n += len;
+    }
+    return n;
+}
+
+/* Written straight into the caller's buffer (no cJSON tree: building one for 40 entries took
+ * ~10 KB of internal heap, which is tight next to the Wi-Fi buffers). */
+size_t events_json_write(char *buf, size_t size) {
     static const char *const names[] = {"info", "warn", "error"};
-    cJSON *root = cJSON_CreateObject();
-    if (root == NULL || s_lock == NULL) {
-        return root;
+    if (s_lock == NULL || size < 128) {
+        return 0;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    cJSON_AddNumberToObject(root, "seq", s_store.seq);
-    cJSON_AddNumberToObject(root, "boot", s_boot);
-    cJSON_AddNumberToObject(root, "uptime_ms", (double)(esp_timer_get_time() / 1000));
-    cJSON *arr = cJSON_AddArrayToObject(root, "events");
+    size_t n = (size_t)snprintf(buf, size, "{\"seq\":%lu,\"boot\":%lu,\"uptime_ms\":%lu,\"events\":[",
+                                (unsigned long)s_store.seq, (unsigned long)s_boot,
+                                (unsigned long)(esp_timer_get_time() / 1000));
     uint32_t first = s_store.seq > EV_N ? s_store.seq - EV_N : 0;
-    for (uint32_t i = first; i < s_store.seq; i++) {
+    bool any = false;
+    for (uint32_t i = first; i < s_store.seq && n + EVENT_JSON_MAX + 4 < size; i++) {
         const event_t *e = &s_store.ev[i % EV_N];
         if (e->seq != i + 1) {
             continue; /* dropped at boot */
         }
-        cJSON *o = cJSON_CreateObject();
-        cJSON_AddNumberToObject(o, "seq", e->seq);
-        cJSON_AddNumberToObject(o, "boot", e->boot);
-        cJSON_AddNumberToObject(o, "t_ms", e->t_ms);
+        n += (size_t)snprintf(buf + n, size - n, "%s{\"seq\":%lu,\"boot\":%lu,\"t_ms\":%lu,", any ? "," : "",
+                              (unsigned long)e->seq, (unsigned long)e->boot, (unsigned long)e->t_ms);
         if (e->unix != 0) {
-            cJSON_AddNumberToObject(o, "unix", e->unix);
+            n += (size_t)snprintf(buf + n, size - n, "\"unix\":%lu,", (unsigned long)e->unix);
         }
-        cJSON_AddStringToObject(o, "level", names[e->level <= EV_ERROR ? e->level : 0]);
-        cJSON_AddStringToObject(o, "msg", e->msg);
-        cJSON_AddItemToArray(arr, o);
+        n += (size_t)snprintf(buf + n, size - n, "\"level\":\"%s\",\"msg\":\"",
+                              names[e->level <= EV_ERROR ? e->level : 0]);
+        n += put_escaped(buf + n, size - n - 3, e->msg);
+        n += (size_t)snprintf(buf + n, size - n, "\"}");
+        any = true;
     }
     xSemaphoreGive(s_lock);
-    return root;
+    n += (size_t)snprintf(buf + n, size - n, "]}");
+    return n < size ? n : size - 1;
 }
 
 const char *events_reset_reason(void) {

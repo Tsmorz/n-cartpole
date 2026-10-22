@@ -256,10 +256,16 @@ static esp_err_t info_get(httpd_req_t *req) {
     return send_json(req, "200 OK", root);
 }
 
+/* Replies go through PSRAM: internal RAM is tight next to the Wi-Fi buffers. */
+static char *reply_buf(size_t size) {
+    char *b = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return b != NULL ? b : heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 /* ---------- GET /api/status ---------- */
 
 static esp_err_t status_get(httpd_req_t *req) {
-    char *buf = heap_caps_malloc(STATUS_JSON_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    char *buf = reply_buf(STATUS_JSON_MAX);
     if (buf == NULL) {
         return send_error(req, "500 Internal Server Error", "out of memory");
     }
@@ -276,8 +282,17 @@ static esp_err_t status_get(httpd_req_t *req) {
 /* ---------- GET /api/events ---------- */
 
 static esp_err_t events_get(httpd_req_t *req) {
+    char *buf = reply_buf(EVENTS_JSON_SIZE);
+    if (buf == NULL) {
+        return send_error(req, "500 Internal Server Error", "out of memory");
+    }
+    size_t n = events_json_write(buf, EVENTS_JSON_SIZE);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return send_json(req, "200 OK", events_json());
+    esp_err_t err = httpd_resp_send(req, buf, (ssize_t)n);
+    heap_caps_free(buf);
+    return err;
 }
 
 /* ---------- POST /api/cmd ---------- */

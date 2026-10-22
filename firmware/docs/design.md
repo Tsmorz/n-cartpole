@@ -232,7 +232,9 @@ counter) on which each zero reference was set, `calib.*_unix` when (if the clock
 quietly without internet (the setup access point). Until it syncs, `unix` is absent from
 the status, events carry only `t_ms`, and zeroing stores no date. The page shows local time.
 
-`events_seq` counts the event-log entries; a page fetches `/api/events` when it moves:
+`events_seq` counts the event-log entries; a page fetches `/api/events` when it moves. The
+reply is written straight into a PSRAM buffer: a cJSON tree of 40 entries cost ~10 KB of the
+tight internal heap.
 
 ```json
 {"seq": 17, "boot": 43, "uptime_ms": 81234,
@@ -248,7 +250,7 @@ reset, a brownout or a reboot are still there afterwards; `t_ms` counts from the
 logged the entry (`boot`). Each entry has its own CRC (one half-written when the chip went
 down is dropped, not the log), and a power-on reset starts it empty. It holds the boot line
 with the reset reason, arming / disarming / faults / mode and model
-changes and loop-budget changes (the `tlm` task turns changes in the control task's status
+changes and loop-budget changes that hold for 10 s (the `tlm` task turns changes in the control task's status
 into entries; deadline misses while armed are summed, one entry per 10 s at most), model
 and firmware uploads, Wi-Fi joins, hostname changes, zeroing and reboots.
 

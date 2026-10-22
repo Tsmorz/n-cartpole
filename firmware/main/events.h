@@ -6,9 +6,9 @@
  * something new happened. */
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
-#include "cJSON.h"
 
 typedef enum {
     EV_INFO = 0,
@@ -21,10 +21,12 @@ typedef enum {
 void events_init(uint32_t boot);
 void events_add(ev_level_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 uint32_t events_seq(void); /* number of events added since boot */
-/* {"seq": n, "boot": b, "uptime_ms": t, "events": [{"seq", "boot", "t_ms", "unix"?, "level", "msg"}, ...]}
- * oldest first; t_ms counts from the boot the entry was logged on; "unix" (s) only when the
- * clock had been set over SNTP. */
-cJSON *events_json(void);
+/* Write {"seq": n, "boot": b, "uptime_ms": t, "events": [{"seq", "boot", "t_ms", "unix"?, "level",
+ * "msg"}, ...]} into buf (oldest first; t_ms counts from the boot the entry was logged on;
+ * "unix" (s) only when the clock had been set over SNTP). Returns the length; EVENTS_JSON_SIZE
+ * always holds the whole log. */
+#define EVENTS_JSON_SIZE 24576
+size_t events_json_write(char *buf, size_t size);
 /* Unix time (s) once the clock has been set over SNTP, else 0 (the clock starts at 1970). */
 uint32_t events_unix_now(void);
 /* Why the chip last reset, in words ("power-on", "brownout (supply dipped)", ...). */

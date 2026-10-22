@@ -317,6 +317,8 @@ static void watch(const ctrl_status_t *st, const model_strs_t *ms) {
     static bool have;
     static uint32_t miss_acc;
     static int64_t miss_at;
+    static bool budget_state = true, budget_logged = true;
+    static int64_t budget_since;
     if (!have) {
         prev = *st;
         have = true;
@@ -341,10 +343,19 @@ static void watch(const ctrl_status_t *st, const model_strs_t *ms) {
     if (st->model != prev.model) {
         events_add(EV_INFO, "model: %s", ms->have ? ms->label : "none");
     }
-    if (st->budget_ok != prev.budget_ok && st->model != NULL) {
-        events_add(st->budget_ok ? EV_INFO : EV_WARN,
-                   "loop budget %s: exec avg %lu us, max %lu us, period %lu us",
-                   st->budget_ok ? "ok again" : "exceeded", (unsigned long)st->exec_avg_us,
+    /* Budget: logged only once a new state has held for 10 s. A loop averaging right at the
+     * 80 % line flips budget_ok every second or two, which would flood the 40-entry log. */
+    int64_t t_now = esp_timer_get_time();
+    if (st->model == NULL) {
+        budget_state = budget_logged = true;
+    } else if (st->budget_ok != budget_state) {
+        budget_state = st->budget_ok;
+        budget_since = t_now;
+    } else if (budget_state != budget_logged && t_now - budget_since >= 10 * 1000000LL) {
+        budget_logged = budget_state;
+        events_add(budget_state ? EV_INFO : EV_WARN,
+                   "loop budget %s for 10 s: exec avg %lu us, max %lu us, period %lu us",
+                   budget_state ? "ok" : "exceeded", (unsigned long)st->exec_avg_us,
                    (unsigned long)st->exec_max_us, (unsigned long)st->nominal_period_us);
     }
     if (st->period_us != prev.period_us && HAL_IS_SIM) {
