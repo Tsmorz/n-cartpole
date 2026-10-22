@@ -200,10 +200,16 @@ static void add_io(cJSON *root, const ctrl_status_t *st) {
         cJSON_AddNumberToObject(cal, "off1", round(cfg->angle_off1 * 1e5) / 1e5);
         cJSON_AddNumberToObject(cal, "off2", round(cfg->angle_off2 * 1e5) / 1e5);
         cJSON_AddNumberToObject(cal, "angles_boot", cfg->angles_boot);
+        if (cfg->angles_unix != 0) {
+            cJSON_AddNumberToObject(cal, "angles_unix", cfg->angles_unix);
+        }
     }
     if (cfg->have_cart_zero) {
         cJSON_AddNumberToObject(cal, "x_zero", round(cfg->x_zero * 1e5) / 1e5);
         cJSON_AddNumberToObject(cal, "cart_boot", cfg->cart_boot);
+        if (cfg->cart_unix != 0) {
+            cJSON_AddNumberToObject(cal, "cart_unix", cfg->cart_unix);
+        }
     }
 }
 
@@ -265,6 +271,9 @@ static void build_status(const ctrl_status_t *st, const model_strs_t *ms) {
     cJSON_AddNumberToObject(root, "uptime_s", (double)(esp_timer_get_time() / 1000000));
     cJSON_AddNumberToObject(root, "boot", settings_get()->boot_count);
     cJSON_AddNumberToObject(root, "events_seq", events_seq());
+    if (events_unix_now() != 0) {
+        cJSON_AddNumberToObject(root, "unix", events_unix_now()); /* the clock is set (SNTP) */
+    }
 
     cJSON *faults = cJSON_AddObjectToObject(root, "faults");
     cJSON_AddNumberToObject(faults, "count", st->fault_count);

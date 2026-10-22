@@ -63,7 +63,13 @@ and in Wi-Fi messages) are links, `task …` commands copy on click, a released 
 links to its release notes, and hints that ask for something carry the button or link that
 does it (Record's "switch to Manual" / "Arm" / "Disarm", "Zero on Live", "upload one").
 
-`tests/test_dashboard.py` runs the page against `firmware/tools/mock_device.py` (API checks,
+The device's clock is set over the internet (SNTP) when it is on your Wi-Fi: event-log entries
+and zero references then show the local date and time, otherwise time since boot. The Arm button
+asks once per page session on the rig (it enables the motor drive), and Health keeps the last
+5 minutes of loop timing next to the last 6 seconds.
+
+`tests/test_api_schema.py` checks the mock (and, with `NCP_DEVICE=http://<ip>`, a real device)
+against `docs/api-schema.json`. `tests/test_dashboard.py` runs the page against `firmware/tools/mock_device.py` (API checks,
 and a Playwright/Chromium pass over every tab at desktop and phone width; `uv run playwright
 install chromium` once). The mock pretends to be the rig with `--rig` (`--uncalibrated`: zero
 references not set) and takes mock-only commands to show trouble: `{"inject_fault": "e-stop"}`,

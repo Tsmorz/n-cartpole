@@ -183,6 +183,11 @@ Commands (`POST /api/cmd`, one key per request):
 }
 ```
 
+Every JSON shape below is also in **`docs/api-schema.json`** (JSON Schema, written from
+`web.c`, `telemetry.c` and `events.c`). `tests/test_api_schema.py` holds the mock to it, and
+checks a real device with `NCP_DEVICE=http://<ip> uv run pytest tests/test_api_schema.py -k device`
+(GETs only). Change the schema with the firmware.
+
 Status (WS text message and `/api/status`):
 
 ```json
@@ -196,7 +201,7 @@ Status (WS text message and `/api/status`):
   "heap": {"internal_free": 180000, "internal_min": 150000, "psram_free": 3800000},
   "wifi": {"mode": "sta" | "ap", "ssid": "...", "ip": "192.168.1.40", "rssi": -52,
            "join": {"state": "idle" | "connecting" | "ok" | "failed", "ssid": "...", "ip": "...", "error": "..."}},
-  "uptime_s": 1234, "boot": 42, "events_seq": 17,
+  "uptime_s": 1234, "boot": 42, "events_seq": 17, "unix": 1792700000,   // unix only once the clock is set
   "faults": {"count": 2, "last": "e-stop", "ago_s": 81.5},
   "io": {"rig": false}
       | {"rig": true, "estop": false, "drive": false, "duty": 0.0, "dir": 1, "cart_count": -88,
@@ -204,7 +209,7 @@ Status (WS text message and `/api/status`):
          "enc": [{"raw": 8170, "bad": 0, "agc": 72, "ocf": true, "cof": false,
                   "comp_low": false, "comp_high": false}, {...}]},
   "calib": {"angles": true, "cart": true, "off1": 2.81734, "off2": -0.41263, "angles_boot": 40,
-            "x_zero": 0.01275, "cart_boot": 40},          // rig only
+            "angles_unix": 1792600000, "x_zero": 0.01275, "cart_boot": 40, "cart_unix": 1792600000},  // rig only
   "cores": [{"id": 0, "load": 12.5}, {"id": 1, "load": 31.0}],
   "tasks": [{"name": "ctrl", "core": 1, "prio": 22, "cpu": 30.9, "stack_free": 2100}, ...]
 }
@@ -221,7 +226,11 @@ per encoder (absent until the first good read): `agc` 0 = strong .. 255 = weak f
 `comp_high` = field too weak (magnet too far), `comp_low` = too strong (too close), `cof` =
 CORDIC overflow, `ocf` = offset compensation finished (should be true). `duty` (0–1) and
 `dir` are the PWM command, `drive` the EN line. `calib.*_boot` is the boot (NVS boot
-counter) on which each zero reference was set.
+counter) on which each zero reference was set, `calib.*_unix` when (if the clock was set).
+
+**Clock:** `app_main` starts SNTP (`pool.ntp.org`, UTC) once the network is up; it retries
+quietly without internet (the setup access point). Until it syncs, `unix` is absent from
+the status, events carry only `t_ms`, and zeroing stores no date. The page shows local time.
 
 `events_seq` counts the event-log entries; a page fetches `/api/events` when it moves:
 
@@ -229,7 +238,8 @@ counter) on which each zero reference was set.
 {"seq": 17, "boot": 43, "uptime_ms": 81234,
  "events": [{"seq": 1, "boot": 42, "t_ms": 412, "level": "info", "msg": "boot #42: v0.2.0, rig backend, reset: power-on"},
             {"seq": 9, "boot": 42, "t_ms": 60120, "level": "error", "msg": "FAULT: e-stop"},
-            {"seq": 10, "boot": 43, "t_ms": 380, "level": "error", "msg": "boot #43: v0.2.0, rig backend, reset: task watchdog"}, ...]}
+            {"seq": 10, "boot": 43, "t_ms": 380, "level": "error", "msg": "boot #43: v0.2.0, rig backend, reset: task watchdog"},
+  {"seq": 11, "boot": 43, "t_ms": 4120, "unix": 1792700000, "level": "info", "msg": "clock set over SNTP"}, ...]}
 ```
 
 The log (`main/events.c`, core 0) keeps the latest 40 entries in RTC memory that a reset

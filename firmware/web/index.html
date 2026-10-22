@@ -184,6 +184,7 @@
                   <div class="meter-legend"><span><i style="background:var(--viz-1)"></i>policy</span><span><i style="background:var(--viz-4)"></i>estimator</span><span><i style="background:var(--viz-7);opacity:.55"></i>rest</span><span><i style="background:var(--viz-2)"></i>max</span></div>
                 </div>
                 <div class="spark"><canvas id="spark" aria-label="Execution time of each streamed tick over the last 6 seconds, against the period and the 80 % budget"></canvas></div>
+                <div class="spark spark-long"><canvas id="spark-long" aria-label="The last 5 minutes: average and worst execution time per status message against the control period, with red marks where deadlines were missed"></canvas></div>
                 <dl class="kv">
                   <dt>policy</dt><dd id="h-pol">—</dd>
                   <dt>estimator</dt><dd id="h-est">—</dd>
@@ -227,7 +228,7 @@
               <section class="card" id="card-log" aria-labelledby="h-log">
                 <div class="card-head"><span class="card-label">events</span><h3 id="h-log">Event log</h3><span class="tag" id="log-tag">—</span></div>
                 <ol class="events" id="events" reversed><li class="muted">Waiting for the device…</li></ol>
-                <p class="panel-hint">Faults, arming, uploads, Wi-Fi and calibration; times are since that boot. The device keeps the latest 40 through crashes, watchdog resets and reboots (not a power-off), so the entries before a reset explain it.</p>
+                <p class="panel-hint">Faults, arming, uploads, Wi-Fi and calibration; local time once the device's clock is set over the internet, else time since that boot (hover for both). The device keeps the latest 40 through crashes, watchdog resets and reboots (not a power-off), so the entries before a reset explain it.</p>
               </section>
     </div>
   </div>

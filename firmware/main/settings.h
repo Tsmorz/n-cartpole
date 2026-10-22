@@ -17,6 +17,8 @@ typedef struct {
     /* Boots since the NVS partition was formatted (this one included), and the boot on
      * which each zero reference was set (0: unknown / before the counter existed). */
     uint32_t boot_count, angles_boot, cart_boot;
+    /* When each zero reference was set (unix s; 0: the clock was not set then). */
+    uint32_t angles_unix, cart_unix;
 } settings_t;
 
 /* nvs_flash_init (erasing an incompatible NVS partition) and load. */

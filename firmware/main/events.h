@@ -21,8 +21,11 @@ typedef enum {
 void events_init(uint32_t boot);
 void events_add(ev_level_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 uint32_t events_seq(void); /* number of events added since boot */
-/* {"seq": n, "boot": b, "uptime_ms": t, "events": [{"seq", "boot", "t_ms", "level", "msg"}, ...]}
- * oldest first; t_ms counts from the boot the entry was logged on. */
+/* {"seq": n, "boot": b, "uptime_ms": t, "events": [{"seq", "boot", "t_ms", "unix"?, "level", "msg"}, ...]}
+ * oldest first; t_ms counts from the boot the entry was logged on; "unix" (s) only when the
+ * clock had been set over SNTP. */
 cJSON *events_json(void);
+/* Unix time (s) once the clock has been set over SNTP, else 0 (the clock starts at 1970). */
+uint32_t events_unix_now(void);
 /* Why the chip last reset, in words ("power-on", "brownout (supply dipped)", ...). */
 const char *events_reset_reason(void);

@@ -7,6 +7,7 @@
 #include "esp_app_desc.h"
 #include "events.h"
 #include "esp_log.h"
+#include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -22,6 +23,21 @@
 static const char *TAG = "main";
 
 #define WIFI_FALLBACK_MS 15000
+
+/* Wall-clock time for the event log and the zero references; UTC (the page shows local). */
+static void on_time_sync(struct timeval *tv) {
+    (void)tv;
+    events_add(EV_INFO, "clock set over SNTP");
+}
+
+static void start_clock(void) {
+    esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    c.sync_cb = on_time_sync;
+    esp_err_t err = esp_netif_sntp_init(&c);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SNTP not started: %s", esp_err_to_name(err));
+    }
+}
 
 void app_main(void) {
     const esp_app_desc_t *app = esp_app_get_description();
@@ -88,6 +104,7 @@ void app_main(void) {
     net_get_info(&ni);
     ESP_LOGI(TAG, "dashboard: http://%s/ or http://%s.local/ (%s '%s')", ni.ip, cfg->hostname,
              ni.ap ? "access point" : "Wi-Fi", ni.ssid);
+    start_clock(); /* retries quietly until there is internet (not on the setup access point) */
 
     ota_confirm_or_rollback();
 }

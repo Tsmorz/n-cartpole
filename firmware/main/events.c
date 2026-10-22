@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_attr.h"
 #include "esp_log.h"
@@ -23,12 +24,14 @@ static const char *TAG = "event";
 
 #define EV_N 40 /* entries kept (RTC memory is small: ~3.7 KB here) */
 #define EV_MSG 72
-#define EV_MAGIC 0x4E435045u /* "NCPE" */
+#define EV_MAGIC 0x4E435032u /* "NCP2" (v2 entries carry unix time) */
+#define UNIX_VALID 1700000000u /* Nov 2023: anything earlier means the clock was never set */
 
 typedef struct {
     uint32_t seq;  /* 1, 2, ... across the boots the store survived */
     uint32_t t_ms; /* since the boot that logged it */
     uint32_t boot; /* NVS boot counter of that boot */
+    uint32_t unix; /* wall-clock seconds, 0 if the clock was not set yet */
     uint8_t level;
     char msg[EV_MSG];
     uint32_t crc; /* over the fields above */
@@ -100,6 +103,7 @@ void events_add(ev_level_t level, const char *fmt, ...) {
     e->seq = seq;
     e->t_ms = (uint32_t)(esp_timer_get_time() / 1000);
     e->boot = s_boot;
+    e->unix = events_unix_now();
     e->level = (uint8_t)level;
     strlcpy(e->msg, msg, sizeof(e->msg));
     e->crc = entry_crc(e);
@@ -108,6 +112,11 @@ void events_add(ev_level_t level, const char *fmt, ...) {
 }
 
 uint32_t events_seq(void) { return s_store.seq; }
+
+uint32_t events_unix_now(void) {
+    time_t now = time(NULL);
+    return now >= (time_t)UNIX_VALID ? (uint32_t)now : 0;
+}
 
 cJSON *events_json(void) {
     static const char *const names[] = {"info", "warn", "error"};
@@ -130,6 +139,9 @@ cJSON *events_json(void) {
         cJSON_AddNumberToObject(o, "seq", e->seq);
         cJSON_AddNumberToObject(o, "boot", e->boot);
         cJSON_AddNumberToObject(o, "t_ms", e->t_ms);
+        if (e->unix != 0) {
+            cJSON_AddNumberToObject(o, "unix", e->unix);
+        }
         cJSON_AddStringToObject(o, "level", names[e->level <= EV_ERROR ? e->level : 0]);
         cJSON_AddStringToObject(o, "msg", e->msg);
         cJSON_AddItemToArray(arr, o);

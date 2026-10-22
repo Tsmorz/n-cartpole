@@ -403,8 +403,10 @@ class Device:
                 "off1": 2.81734,
                 "off2": -0.41263,
                 "angles_boot": 5,
+                "angles_unix": int(time.time()) - 3 * 86400,
                 "x_zero": 0.01275,
                 "cart_boot": 5,
+                "cart_unix": int(time.time()) - 3 * 86400,
             }
         )
         self.enc_bad = [0, 0]
@@ -470,6 +472,7 @@ class Device:
                 "boot": self.boot_count,
                 # max: the reboot logs its boot line just before the new boot's clock starts
                 "t_ms": max(0, int((time.monotonic() - self.boot) * 1000)),
+                "unix": int(time.time()),  # the device's clock is set over SNTP
                 "level": level,
                 "msg": msg,
             }
@@ -705,6 +708,7 @@ class Device:
                     off1=round(float(self.rng.uniform(-3, 3)), 5),
                     off2=round(float(self.rng.uniform(-3, 3)), 5),
                     angles_boot=self.boot_count,
+                    angles_unix=int(time.time()),
                 )
                 self.event(
                     "info",
@@ -715,6 +719,7 @@ class Device:
                     cart=True,
                     x_zero=round(float(self.rng.uniform(-0.02, 0.02)), 5),
                     cart_boot=self.boot_count,
+                    cart_unix=int(time.time()),
                 )
                 self.event("info", f"cart zeroed: x_zero {self.calib['x_zero']:.4f} m")
         elif key == "record":
@@ -1107,6 +1112,9 @@ class Device:
             "x_ref": round(self.x_ref, 4),
             "settled": self.settle_ok,
             "backend": "rig" if self.rig else "sim",
+            "model": self.blob_hdr["label"]
+            if self.blob_hdr
+            else None,  # telemetry.c: the label
             "loop": loop,
             "heap": {
                 "internal_free": int(182000 + j(800)),
@@ -1117,6 +1125,7 @@ class Device:
             "uptime_s": int(time.monotonic() - self.boot),
             "boot": self.boot_count,
             "events_seq": self.events_seq,
+            "unix": int(time.time()),
             "faults": {"count": self.fault_count, "last": self.last_fault}
             | (
                 {"ago_s": round(time.monotonic() - self.last_fault_t, 1)}
@@ -1217,7 +1226,7 @@ class Device:
             if time.monotonic() < self.down_until:
                 self.frames.clear()
                 continue
-            frames = []
+            frames: list[bytes] = []
             while self.frames and len(frames) < 255:
                 frames.append(self.frames.popleft())
             msg = MSG_HDR.pack(TLM_VERSION, len(frames), FRAME.size) + b"".join(frames)

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "events.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -58,6 +59,8 @@ esp_err_t settings_init(void) {
         }
         s_settings.angles_boot = load_u32(h, "off_boot");
         s_settings.cart_boot = load_u32(h, "xz_boot");
+        s_settings.angles_unix = load_u32(h, "off_unix");
+        s_settings.cart_unix = load_u32(h, "xz_unix");
         ssid_stored = load_str(h, "ssid", s_settings.ssid, sizeof(s_settings.ssid));
         load_str(h, "pass", s_settings.password, sizeof(s_settings.password));
         load_str(h, "host", s_settings.hostname, sizeof(s_settings.hostname));
@@ -135,8 +138,9 @@ esp_err_t settings_save_hostname(const char *hostname) {
     return err;
 }
 
-/* k1 (and k2), plus the current boot number under kboot. */
-static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double v2, const char *kboot) {
+/* k1 (and k2), plus the current boot number under kboot and the unix time under kunix. */
+static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double v2, const char *kboot,
+                              const char *kunix, uint32_t unix_now) {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
@@ -150,6 +154,9 @@ static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double 
         err = nvs_set_u32(h, kboot, s_settings.boot_count);
     }
     if (err == ESP_OK) {
+        err = nvs_set_u32(h, kunix, unix_now);
+    }
+    if (err == ESP_OK) {
         err = nvs_commit(h);
     }
     nvs_close(h);
@@ -157,22 +164,26 @@ static esp_err_t save_doubles(const char *k1, double v1, const char *k2, double 
 }
 
 esp_err_t settings_save_angle_offsets(double off1, double off2) {
-    esp_err_t err = save_doubles("off1", off1, "off2", off2, "off_boot");
+    uint32_t now = events_unix_now();
+    esp_err_t err = save_doubles("off1", off1, "off2", off2, "off_boot", "off_unix", now);
     if (err == ESP_OK) {
         s_settings.angle_off1 = off1;
         s_settings.angle_off2 = off2;
         s_settings.have_angle_offsets = true;
         s_settings.angles_boot = s_settings.boot_count;
+        s_settings.angles_unix = now;
     }
     return err;
 }
 
 esp_err_t settings_save_cart_zero(double x_zero) {
-    esp_err_t err = save_doubles("xzero", x_zero, NULL, 0.0, "xz_boot");
+    uint32_t now = events_unix_now();
+    esp_err_t err = save_doubles("xzero", x_zero, NULL, 0.0, "xz_boot", "xz_unix", now);
     if (err == ESP_OK) {
         s_settings.x_zero = x_zero;
         s_settings.have_cart_zero = true;
         s_settings.cart_boot = s_settings.boot_count;
+        s_settings.cart_unix = now;
     }
     return err;
 }

@@ -23,6 +23,7 @@ dev = [
     "ruff==0.9.10",
     "mypy==1.15.0",
     "playwright>=1.49,<2",
+    "jsonschema>=4.23,<5",
 ]
 
 [build-system]

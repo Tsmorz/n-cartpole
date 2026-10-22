@@ -249,6 +249,7 @@
     rebooting: null, lastFrameSeen: 0,
     link: { frames: 0, fps: null, gaps: 0, lost: 0 },  // telemetry as this page receives it
     misses: [], missArm: null, statusRun: null,         // deadline misses over time, at arming
+    loopHist: [], armConfirmed: false,
     events: { seq: -1, list: [], loading: false, seenBad: 0 },
     parityN: 0, parityAt: 0, stale: false
   };
@@ -485,6 +486,8 @@
     }).catch(function () { /* the socket's reconnect loop retries */ });
   }
 
+  var LOOP_HIST_MS = 5 * 60 * 1000;
+
   /* ---- Event log: fetched when status.events_seq moves ---- */
   function loadEvents() {
     if (S.events.loading) return;
@@ -617,6 +620,11 @@
       if (s.run === 'armed' && S.statusRun !== 'armed') S.missArm = L.misses;
     }
     S.statusRun = s.run;
+    if (L.exec_avg_us != null) {
+      var lh = S.loopHist, prevMiss = lh.length ? lh[lh.length - 1].misses : L.misses;
+      lh.push({ t: now, avg: L.exec_avg_us, max: L.exec_max_us, missed: L.misses > prevMiss, misses: L.misses });
+      while (lh.length && now - lh[0].t > LOOP_HIST_MS) lh.shift();
+    }
     if (s.events_seq != null && s.events_seq !== S.events.seq) loadEvents();
     if (!S.last || performance.now() - S.lastFrameSeen > 1000) {
       if (s.run) S.run = s.run;
@@ -762,7 +770,11 @@
     // Health
     var ex = L.exec_avg_us, mx = L.exec_max_us, pol = L.policy_avg_us, est = L.est_avg_us;
     setText('loop-exec', us(ex)); setText('loop-period', us(period));
-    setText('fact-exec', ex != null ? Math.round(100 * ex / period) + ' %' : '—');
+    var nominal = geom().dt * 1e6, load = ex != null ? ex / nominal : null, rtf = L.rt_factor;
+    setText('fact-exec', load != null ? Math.round(100 * load) + ' %' : '—');
+    $('fact-exec').className = load != null && load > 0.8 ? 'bad' : '';
+    $('fact-exec').title = 'Average execution against the ' + us(nominal) + ' control period' +
+      (rtf != null && rtf < 0.995 ? '; the simulator runs in slow motion (×' + rtf.toFixed(2) + ') to fit it' : '');
     var rate = missRate(), sinceArm = S.missArm != null && L.misses != null && s.run === 'armed' ? L.misses - S.missArm : null;
     setText('fact-miss', rate != null ? num(rate, rate < 10 ? 1 : 0) : '—');
     $('fact-miss').className = rate ? 'bad' : '';
@@ -867,7 +879,9 @@
   function renderLink() {
     var s = S.status || {}, hp = s.heap || {}, w = s.wifi || {}, L = S.link, live = S.conn === 'live';
     var rate = get(S.info, 'telemetry.rate_hz', null), age = S.statusAt ? (performance.now() - S.statusAt) / 1000 : null;
-    var low = live && L.fps != null && rate && L.fps < 0.8 * rate;
+    // In slow motion (sim over budget) the device sends fewer frames per second by design.
+    var rtf = get(s, 'loop.rt_factor', 1) || 1, expect = rate ? Math.round(rate * Math.min(1, rtf)) : null;
+    var low = live && L.fps != null && expect && L.fps < 0.8 * expect;
     setText('fact-link', live && L.fps != null ? L.fps + ' fps' : '—');
     kv('dev-kv', [
       { head: 'memory' },
@@ -876,9 +890,10 @@
       ['psram free', hp.psram_free != null ? bytes(hp.psram_free) : null],
       { head: 'link' },
       ['wi-fi', w.mode === 'ap' ? 'access point (setup)' : w.rssi != null ? w.rssi + ' dBm' + (w.ssid ? ' · ' + w.ssid : '') : null, w.mode === 'ap' ? 'accent' : w.rssi != null && w.rssi < -75 ? 'bad' : ''],
-      ['telemetry', live && L.fps != null ? L.fps + (rate ? ' / ' + rate : '') + ' fps' : live ? '…' : 'not connected', low ? 'bad' : live ? 'good' : ''],
+      ['telemetry', live && L.fps != null ? L.fps + (expect ? ' / ' + expect : '') + ' fps' + (rtf < 0.995 ? ' (slow motion ×' + rtf.toFixed(2) + ')' : '') : live ? '…' : 'not connected', low ? 'bad' : live ? 'good' : ''],
       ['frames lost', live ? L.lost + (L.gaps ? ' in ' + plural(L.gaps, 'gap') : '') : null, L.lost ? 'accent' : ''],
-      ['status age', age != null && live ? age.toFixed(1) + ' s' : null, age != null && age > 2 ? 'bad' : '']
+      ['status age', age != null && live ? age.toFixed(1) + ' s' : null, age != null && age > 2 ? 'bad' : ''],
+      ['device clock', s.unix ? when(s.unix) + ' (SNTP)' : S.status ? 'not set (no internet yet)' : null, s.unix ? '' : 'accent', 'Event-log and calibration times use it']
     ]);
   }
 
@@ -935,8 +950,8 @@
         ['drive', io.drive ? 'enabled · ' + Math.round(100 * (io.duty || 0)) + ' % ' + (io.dir < 0 ? '−x' : '+x') : 'disabled (EN low)', io.drive ? 'accent' : ''],
         ['cart encoder', io.cart_count + ' counts'],
         { head: 'zero references' },
-        ['angles', cal.angles ? 'set' + (cal.angles_boot ? ' on boot #' + cal.angles_boot : '') + (cal.off1 != null ? ' · ' + num(cal.off1, 4) + ', ' + num(cal.off2, 4) + ' rad' : '') : 'not set', cal.angles ? 'good' : 'bad'],
-        ['cart', cal.cart ? 'set' + (cal.cart_boot ? ' on boot #' + cal.cart_boot : '') + (cal.x_zero != null ? ' · ' + num(cal.x_zero, 4) + ' m' : '') : 'not set', cal.cart ? 'good' : 'bad']
+        ['angles', cal.angles ? setWhen(cal.angles_unix, cal.angles_boot) + (cal.off1 != null ? ' · ' + num(cal.off1, 4) + ', ' + num(cal.off2, 4) + ' rad' : '') : 'not set', cal.angles ? 'good' : 'bad'],
+        ['cart', cal.cart ? setWhen(cal.cart_unix, cal.cart_boot) + (cal.x_zero != null ? ' · ' + num(cal.x_zero, 4) + ' m' : '') : 'not set', cal.cart ? 'good' : 'bad']
       ].map(function (r) {
         return r.head ? '<span class="kv-head">' + esc(r.head) + '</span>' : '<dt>' + esc(r[0]) + '</dt><dd class="' + (r[2] || '') + '">' + esc(r[1]) + '</dd>';
       }).join('') + '</dl>' +
@@ -947,7 +962,7 @@
     S.ioBad = problems.length > 0;
     // Live → Calibrate
     var cl = $('cal-line');
-    cl.textContent = cal.angles && cal.cart ? 'Zeroed: angles' + (cal.angles_boot ? ' on boot #' + cal.angles_boot : '') + ', cart' + (cal.cart_boot ? ' on boot #' + cal.cart_boot : '') + '. Re-zero after moving a magnet or the belt.'
+    cl.textContent = cal.angles && cal.cart ? 'Zeroed: angles ' + setWhen(cal.angles_unix, cal.angles_boot).replace(/^set /, '') + ', cart ' + setWhen(cal.cart_unix, cal.cart_boot).replace(/^set /, '') + '. Re-zero after moving a magnet or the belt.'
       : (!cal.angles && !cal.cart ? 'Neither zero reference is set' : !cal.angles ? 'The angles are not zeroed' : 'The cart is not zeroed') + ': arming is refused until both are.';
     cl.className = 'panel-hint' + (cal.angles && cal.cart ? '' : ' bad');
   }
@@ -956,6 +971,16 @@
     setTabAlert('health', S.events.newBad || S.ioBad ? 'bad' : S.healthWarn ? 'warn' : null);
   }
 
+  // Unix seconds → local "22 Oct 14:03" (today: just the time).
+  function when(unix) {
+    var d = new Date(unix * 1000), today = new Date().toDateString() === d.toDateString();
+    var hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return today ? hm : d.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' ' + hm;
+  }
+  // "set 22 Oct 14:03 (boot #5)" for a zero reference.
+  function setWhen(unix, boot) {
+    return 'set' + (unix ? ' ' + when(unix) : '') + (boot ? (unix ? ' (boot #' + boot + ')' : ' on boot #' + boot) : '');
+  }
   function clock(ms) {
     var t = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, x = t % 60;
     return (h ? h + ':' + (m < 10 ? '0' : '') : '') + m + ':' + (x < 10 ? '0' : '') + x;
@@ -971,7 +996,7 @@
         html.push('<li class="ev-sep">' + (e.boot === E.boot ? 'this boot' : 'before the reset') + (e.boot != null ? ' · boot #' + e.boot : '') + '</li>');
         prevBoot = e.boot;
       }
-      html.push('<li class="ev ev-' + esc(e.level) + (multi && e.boot !== E.boot ? ' ev-prev' : '') + '"><time title="since that boot">' + clock(e.t_ms) + '</time><span>' + linkify(e.msg) + '</span></li>');
+      html.push('<li class="ev ev-' + esc(e.level) + (multi && e.boot !== E.boot ? ' ev-prev' : '') + '"><time title="' + (e.unix ? esc(new Date(e.unix * 1000).toLocaleString()) + ' · ' : '') + clock(e.t_ms) + ' after boot #' + e.boot + '">' + (e.unix ? when(e.unix) : clock(e.t_ms)) + '</time><span>' + linkify(e.msg) + '</span></li>');
     });
     list.innerHTML = html.join('');
     var nBad = E.list.filter(function (e) { return e.level === 'error'; }).length, nWarn = E.list.filter(function (e) { return e.level === 'warn'; }).length;
@@ -1176,8 +1201,17 @@
   }
 
   // Arm / Disarm. Esc disarms from anywhere on the page.
+  // The first arm of a page session on the rig asks once: it enables the motor drive.
+  function requestArm(on) {
+    if (on && S.backend === 'rig' && !S.armConfirmed) {
+      if (!window.confirm('Arm the rig?\n\nThe motor drive is enabled and the cart can move fast. Keep clear of the rail. ' +
+        'Esc (or the header state chip) disarms from any tab; the hardware e-stop cuts power.')) return Promise.resolve(null);
+      S.armConfirmed = true;
+    }
+    return send({ arm: !!on });
+  }
   document.querySelectorAll('[data-arm]').forEach(function (b) {
-    b.addEventListener('click', function () { send({ arm: S.run !== 'armed' }).catch(function () {}); });
+    b.addEventListener('click', function () { requestArm(S.run !== 'armed').catch(function () {}); });
   });
   $('run-chip').addEventListener('click', function () {
     if (S.run === 'armed') { send({ arm: false }).catch(function () {}); flash('cmd-msg', 'Disarmed.', 'good', 2000); }
@@ -1535,6 +1569,40 @@
     ctx.fillText('this tick ' + us(hist[n - 1].loop), W - 6, top + 2);
   }
 
+  // The last 5 minutes from the 2 Hz status: average and worst execution per message against
+  // the control period, red marks where deadlines were missed.
+  var sparkLongCv = $('spark-long');
+  function drawSparkLong() {
+    var c = sizeCanvas(sparkLongCv), ctx = c.ctx, W = c.W, H = c.H, G = geom(), h = S.loopHist, n = h.length;
+    var period = G.dt * 1e6, now = performance.now(), muted = cssVar('--text-muted'), mono = cssVar('--mono');
+    ctx.fillStyle = cssVar('--bg'); ctx.fillRect(0, 0, W, H);
+    var top = 12, bot = H - 16, peak = period;
+    for (var i = 0; i < n; i++) peak = Math.max(peak, h[i].max || 0);
+    var lim = Math.min(peak * 1.1, period * 4);
+    function y(v) { return bot - clamp(v / lim, 0, 1.02) * (bot - top); }
+    function x(t) { return W * (1 - (now - t) / LOOP_HIST_MS); }
+    ctx.strokeStyle = cssVar('--border-strong'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y(period)); ctx.lineTo(W, y(period)); ctx.stroke();
+    ctx.strokeStyle = cssVar('--lime'); ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(0, y(0.8 * period)); ctx.lineTo(W, y(0.8 * period)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.font = '9px ' + mono; ctx.textBaseline = 'bottom'; ctx.textAlign = 'left'; ctx.fillStyle = muted;
+    ctx.fillText('period ' + us(period), 6, y(period) - 1);
+    ctx.textBaseline = 'alphabetic';
+    for (var m = 0; m <= 5; m++) { ctx.textAlign = m === 0 ? 'right' : m === 5 ? 'left' : 'center'; ctx.fillText(m === 0 ? 'now' : '−' + m + ' min', W * (1 - m / 5) + (m === 0 ? -2 : m === 5 ? 2 : 0), H - 3); }
+    if (!n) { ctx.textAlign = 'center'; ctx.fillText('collecting… (5 min of status messages)', W / 2, (top + bot) / 2); return; }
+    function line(key, color, w) {
+      ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath();
+      for (var k = 0; k < n; k++) { var xp = x(h[k].t), yp = y(h[k][key]); if (k === 0 || h[k].t - h[k - 1].t > 3000) ctx.moveTo(xp, yp); else ctx.lineTo(xp, yp); }
+      ctx.stroke();
+    }
+    line('max', cssVar('--viz-2'), 1);
+    line('avg', cssVar('--viz-1'), 1.4);
+    ctx.fillStyle = cssVar('--bad');
+    for (i = 0; i < n; i++) if (h[i].missed) ctx.fillRect(x(h[i].t) - 1, bot - 4, 2, 6);
+    ctx.textAlign = 'right'; ctx.fillStyle = muted; ctx.textBaseline = 'top';
+    ctx.fillText('5 min · avg / max per status', W - 6, 2);
+  }
+
   /* ---- Network diagram: the SimBa actor with live activations (swingup.js drawNet) ---- */
   function drawNet() {
     var c = sizeCanvas(netCv), ctx = c.ctx, W = c.W, H = c.H;
@@ -1675,7 +1743,7 @@
     return true;
   }
 
-  var lastStatusRender = 0, lastReadout = 0;
+  var lastStatusRender = 0, lastReadout = 0, lastLong = 0;
   function frame(now) {
     var ran = runNet(now);   // every tab: the parity check in Settings → Model needs it
     if (S.tab === 'live') {
@@ -1685,7 +1753,7 @@
       if (ran || !S.policy || now - lastNetAt > 500) drawNet();
     }
     if (S.tab === 'record') drawPlot(recPlotCv, true);
-    if (S.tab === 'health') drawSpark();
+    if (S.tab === 'health') { drawSpark(); if (now - lastLong > 1000) { lastLong = now; drawSparkLong(); } }
     if (S.model.state === 'loading' && now - lastStatusRender > 200) { lastStatusRender = now; renderNetMeta(); }
     requestAnimationFrame(frame);
   }
@@ -2057,7 +2125,7 @@
     }
     var we = $('rec-warn'); we.hidden = !w;
     we.innerHTML = esc(w) + (fix ? ' <button class="notice-btn" type="button" id="rec-fix">' + esc(fix.label) + '</button>' : '');
-    if (fix) $('rec-fix').onclick = function () { send(fix.mode ? { mode: fix.mode } : { arm: fix.arm }).catch(function (er) { flash('rec-msg', er.message, 'bad'); }); };
+    if (fix) $('rec-fix').onclick = function () { (fix.mode ? send({ mode: fix.mode }) : requestArm(fix.arm)).catch(function (er) { flash('rec-msg', er.message, 'bad'); }); };
     // Progress
     var cap = r && r.capacity_s ? r.capacity_s : 0, secs = r ? r.seconds || 0 : 0;
     setText('rec-state', !r ? 'no recording yet' : recording ? 'recording' + (r.note ? ' · ' + r.note : '') : st === 'done' ? 'last recording' + (r.note ? ' · ' + r.note : '') : 'idle');

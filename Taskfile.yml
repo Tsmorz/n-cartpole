@@ -155,7 +155,7 @@ tasks:
     cmds:
       - uv run ruff format {{.RUFF_FLAGS}}
       - uv run ruff check --fix {{.RUFF_FLAGS}}
-      - uv run mypy n_cartpole/ tests/ scripts/ --ignore-missing-imports {{.MYPY_FLAGS}}
+      - uv run mypy n_cartpole/ tests/ scripts/ firmware/tools/ --ignore-missing-imports {{.MYPY_FLAGS}}
 
   ci:
     desc: Run the full CI suite locally (format + test), bypassing tool caches like a fresh CI runner
