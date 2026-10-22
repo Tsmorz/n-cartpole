@@ -188,3 +188,22 @@ nominal model plus randomization, so the closer the nominal is to the truth, the
   velocity-filter recommendation (≈ 40 ms lag). Lag-budget study done: EMA α ≤ 0.5 fits the
   budget (jitter −20 % at α = 0.3, −40 % at α = 0.5); model-based observer ~10× quieter in
   the frictionless ideal but not yet reliable (DU fails, stiction hurts).
+- 2026-10-22 — LQR hold study (user request; `n_cartpole/control/`, `scripts/lqr_study.py`, `tests/test_lqr.py`).
+  Question: hold the unstable equilibria with LQR and keep the RL policy for swing-up/transitions.
+  Design: linearise `dynamics._ode` at each goal (rail Coulomb friction left out: its regularised slope is a
+  fictitious 80 N·s/m at rest), ZOH at 5 ms, state augmented with the commands in flight (delay 1) and the
+  input = change of commanded force per step (matches `action_mode="delta"`, penalised so holds are smooth).
+  All four goals are controllable (rank 7/7) and stable. Open-loop unstable poles: UU 5.4/10.4 s⁻¹, DU 7.5, UD 7.9.
+  The default gains saturate the 300 N/s (1.5 N/step) slew limit for any angle error above ~0.01 rad, so the
+  catch region is small; a random search over the six weights (45 sets, per goal) widened it only modestly
+  (fresh seeds, 40 episodes per cell, perturbation ±s rad / ±2s rad/s: UU 72/55/40 % vs 57/40/32 % at
+  s = 0.10/0.15/0.20, DU 98/98/60 vs 95/82/45, UD 100 % either way) at a cost of 0.9 vs 0.75 N RMS hold force in UU.
+  Tuned weights: `config/lqr_weights.json`. Catch level (cost-to-go z'Pz, ≥ 95 % caught, randomized plant, EKF,
+  delay): 1280 for every goal on a doubling grid (≈ ±6° per link in UU, ±7–12° DU, ±17–34° UD).
+  Hybrid (policy drives; LQR from level < 640 back to the policy above 3840; UU/DU/UD only), 20 trials per
+  (start, goal), 8 s, the h48×2 RL student, full realism, same seeds: overall 89.7 % -> 92.5 % (+9 of 320 trials),
+  no cell worse, 6 better (DU->UU 70 -> 85, DD->DU 85 -> 95, UU->UU 90 -> 95, ...). The remaining failures are the
+  policy's swing-up failures (identical off-rail counts). Hold RMS force: UU 2.15 -> 0.88 N, DU 1.28 -> 0.58 N,
+  UD 0.61 -> 0.49 N; post-settle falls out of DU (max deviation 3.14 rad in the policy-only run) disappear
+  (0.15-0.24 rad). Caveats: one checkpoint and one randomization setting; engage/release fractions not tuned;
+  weights tuned on the same plant distribution (other seeds); no rig data yet. Not ported to the firmware.
