@@ -263,6 +263,34 @@ access point. Wi-Fi power save is off
 (`WIFI_PS_NONE`): modem sleep makes the radio miss multicast queries, so the `.local` name
 resolved only intermittently, and it adds latency jitter to the telemetry stream.
 
+## Memory budget
+
+Internal RAM is the scarce resource: the S3 has ~340 KB of DIRAM, ~120 KB of it static. The
+f32 actor (~150 KB for the 38k-parameter h48x2 student) runs from internal RAM in ~0.76 ms per
+tick; streamed from PSRAM (octal, 80 MHz, ~75 MB/s) the same net takes ~2.1-2.4 ms, and Wi-Fi traffic on
+core 0 competes for that bandwidth. `sdkconfig.defaults` therefore:
+
+- puts Wi-Fi/lwIP dynamic allocations in PSRAM (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), makes the Wi-Fi TX and
+  management buffers dynamic, trims the static RX/TX pools and pins the block-ack window to 6
+  (the Wi-Fi config check needs `RX_BA_WIN <= 2 * STATIC_RX_BUFFER_NUM`);
+- drops the IRAM-resident Wi-Fi fast paths (they come out of the same SRAM pool as the heap);
+- sets the data cache to 32 KB (the other 32 KB become heap; with the weights in internal RAM the
+  PSRAM traffic the cache absorbs is small).
+
+Measured (sim backend): free internal heap after boot 61 KB (min 33 KB) -> 188 KB with the weights in
+PSRAM, 37 KB (min 21 KB) with the weights internal. `model_store.c` places the weights in internal RAM
+when `weights + INTERNAL_SPARE (32 KB)` fits the largest free block at load time (the log line "largest
+free internal block" shows the numbers) and keeps that buffer ("arena") across unloads: after Wi-Fi and
+httpd have run internal RAM is fragmented, and a hot-reloaded model would otherwise fall back to PSRAM.
+A model too large for the margin (e.g. an h64x2 f32 actor, ~270 KB) falls back to PSRAM and is
+~3x slower per tick; `weights_in` in `/api/info` says which. Per tick (rig-relevant): policy 0.76 ms
++ EKF 0.5 ms (single-precision EKF, see `ncp_ekf.h`); the sim backend adds ~2.3 ms of
+double-precision plant integration that the rig does not have.
+
+mDNS: after the station connects the device creates an IPv6 link-local address so the responder
+answers AAAA as well as A; without it macOS waits out a 5 s timeout for the AAAA answer
+(the IDF responder sends no negative answer). The HTTP server itself is IPv4-only in IDF 5.3.
+
 ## Updates
 
 - **USB flash:** `task fw-flash -- <port>` writes the merged factory image

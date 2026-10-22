@@ -13,7 +13,11 @@
 static const char *TAG = "model";
 
 #define MODEL_SUBTYPE ((esp_partition_subtype_t)0x40)
-#define INTERNAL_SPARE (64 * 1024)  /* internal RAM to leave free after the weights */
+/* Internal RAM to leave free after the weights, for what is allocated after the model loads
+ * (Wi-Fi/lwIP/httpd/task stacks). Measured with the sdkconfig.defaults RAM budget: ~39 KB are
+ * still free after boot with the weights inside (min ~24 KB under load). A model that does not
+ * fit with this margin falls back to PSRAM, which is ~4x slower per tick. */
+#define INTERNAL_SPARE (32 * 1024)
 #define CHUNK 4096                  /* fallback read size (multiple of 4) */
 #define ERASE_BLOCK (64 * 1024)
 #define CAPS_INTERNAL (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -28,6 +32,18 @@ static size_t s_erased;
 static SemaphoreHandle_t s_lock;
 
 static void set_err(const char *msg) { strlcpy(s_err, msg, sizeof(s_err)); }
+
+/* The weights buffer lives in internal RAM when it fits, and is then kept across unloads: after
+ * Wi-Fi and the HTTP server have run, internal RAM is fragmented and a block that size no longer
+ * exists, so a reloaded model would otherwise fall back to PSRAM (~3x slower per tick). */
+static void *s_arena;
+static size_t s_arena_bytes;
+
+static void release_weights(void *w) {
+    if (w != NULL && w != s_arena) {
+        heap_caps_free(w);
+    }
+}
 
 static void unmap(void) {
     if (s_map != NULL) {
@@ -69,7 +85,7 @@ void model_store_unload(void) {
     model_store_lock();
     unmap();
     if (s_cur != NULL) {
-        heap_caps_free(s_cur->weights);
+        release_weights(s_cur->weights);
         heap_caps_free(s_cur->scratch);
         free(s_cur);
         s_cur = NULL;
@@ -172,8 +188,25 @@ const model_t *model_store_load(void) {
     if (m->scratch == NULL) {
         goto oom;
     }
-    if (bytes + INTERNAL_SPARE <= heap_caps_get_largest_free_block(CAPS_INTERNAL)) {
-        m->weights = heap_caps_malloc(bytes, CAPS_INTERNAL);
+    if (s_arena != NULL && bytes <= s_arena_bytes) {
+        m->weights = s_arena; /* reload into the internal buffer kept from the last model */
+    } else {
+        if (s_arena != NULL) { /* too small for this model: give it back and look again */
+            heap_caps_free(s_arena);
+            s_arena = NULL;
+            s_arena_bytes = 0;
+        }
+        const size_t largest = heap_caps_get_largest_free_block(CAPS_INTERNAL);
+        ESP_LOGI(TAG, "weights %u KB, largest free internal block %u KB (spare to keep: %u KB)",
+                 (unsigned)(bytes / 1024), (unsigned)(largest / 1024),
+                 (unsigned)(INTERNAL_SPARE / 1024));
+        if (bytes + INTERNAL_SPARE <= largest) {
+            m->weights = heap_caps_malloc(bytes, CAPS_INTERNAL);
+            if (m->weights != NULL) {
+                s_arena = m->weights;
+                s_arena_bytes = bytes;
+            }
+        }
     }
     if (m->weights == NULL) {
         m->weights = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -223,7 +256,7 @@ oom:
     set_err("out of memory");
 fail:
     if (m != NULL) {
-        heap_caps_free(m->weights);
+        release_weights(m->weights);
         heap_caps_free(m->scratch);
         free(m);
     }

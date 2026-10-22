@@ -53,6 +53,15 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
         if (s_joining || !s_ap_mode) {
             esp_wifi_connect(); /* keep trying (the AP fallback / the join timeout decides) */
         }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        /* An IPv6 link-local address lets the mDNS responder answer the AAAA query as well as
+         * the A query. Without it macOS (and curl, browsers) wait out a 5 s timeout for the
+         * AAAA answer that never comes before using the IPv4 address; the IDF responder does
+         * not send a negative (NSEC) answer. The HTTP server itself stays IPv4-only. */
+        esp_err_t err = esp_netif_create_ip6_linklocal(s_sta);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "no IPv6 link-local address: %s (mDNS lookups will be slow)", esp_err_to_name(err));
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *e = (const ip_event_got_ip_t *)data;
         esp_ip4addr_ntoa(&e->ip_info.ip, s_sta_ip, sizeof(s_sta_ip));
