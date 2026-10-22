@@ -141,8 +141,8 @@ static void publish(void) {
     p->goal = s_model != NULL ? (uint8_t)s_ctrl.goal : 0;
     p->random = s_random;
     p->settled = s_model != NULL && ncp_ctrl_settled(&s_ctrl);
-    p->estop = hal_estop();
-    p->off_rail = s_model != NULL && hal_off_rail(s_pos, x_lim());
+    p->estop = ncp_hal_estop();
+    p->off_rail = s_model != NULL && ncp_hal_off_rail(s_pos, x_lim());
     p->x_ref = s_model != NULL ? (float)s_ctrl.x_ref : 0.0f;
     p->period_us = s_period_us;
     p->nominal_period_us = s_nominal_us;
@@ -151,7 +151,7 @@ static void publish(void) {
     p->policy_avg_us = s_pol_avg;
     p->est_avg_us = s_est_avg;
     p->misses = s_misses;
-    p->read_errors = hal_read_errors();
+    p->read_errors = ncp_hal_read_errors();
     p->tlm_dropped = tlm_dropped();
     p->rt_factor = (float)s_nominal_us / (float)s_period_us;
     p->budget_ok = s_timed && s_exec_avg <= (uint32_t)(BUDGET * s_nominal_us);
@@ -187,7 +187,7 @@ static void attach_model(const model_t *m) {
     s_random_wait = -1;
     s_offrail_ticks = 0;
     memset(s_pos, 0, sizeof(s_pos));
-    hal_set_model(m != NULL ? &m->hdr : NULL);
+    ncp_hal_set_model(m != NULL ? &m->hdr : NULL);
     if (m != NULL) {
         ncp_policy_init(&s_pol, &m->m, m->scratch);
         ncp_ctrl_init(&s_ctrl, &m->m, &s_pol);
@@ -214,13 +214,13 @@ static void attach_model(const model_t *m) {
 }
 
 static bool can_arm(void) {
-    if (s_model == NULL || s_run == NCP_RUN_MAINT || hal_estop() ||
-        hal_off_rail(s_pos, x_lim())) {
+    if (s_model == NULL || s_run == NCP_RUN_MAINT || ncp_hal_estop() ||
+        ncp_hal_off_rail(s_pos, x_lim())) {
         return false;
     }
 #if !HAL_IS_SIM
     if (s_model->hdr.n_links != 2 || !s_timed || s_exec_avg > (uint32_t)(BUDGET * s_nominal_us) ||
-        hal_read_errors() > 0) {
+        ncp_hal_read_errors() > 0) {
         return false;
     }
 #endif
@@ -289,7 +289,7 @@ static void rec_append(int64_t t0, uint32_t period_meas, uint32_t missed, bool r
     r.applied = (float)(s_run == NCP_RUN_ARMED && s_model != NULL ? s_ctrl.est_force : 0.0);
     r.excite = (float)s_ext;
     uint8_t flags = 0;
-    const double *truth = hal_sim_truth();
+    const double *truth = ncp_hal_sim_truth();
     for (int k = 0; k < NCP_MAX_STATE; k++) {
         r.truth[k] = NAN;
     }
@@ -351,7 +351,7 @@ static void handle(const ctrl_cmd_t *c) {
         return;
     case CTRL_CMD_ZERO_ANGLES:
         if (!HAL_IS_SIM && s_run != NCP_RUN_ARMED) {
-            hal_rig_zero_angles(&s_zero_off1, &s_zero_off2);
+            ncp_hal_rig_zero_angles(&s_zero_off1, &s_zero_off2);
             if (s_model != NULL) {
                 ncp_ctrl_reset(&s_ctrl);
             }
@@ -361,7 +361,7 @@ static void handle(const ctrl_cmd_t *c) {
         return;
     case CTRL_CMD_ZERO_CART:
         if (!HAL_IS_SIM && s_run != NCP_RUN_ARMED) {
-            hal_rig_zero_cart(&s_zero_x);
+            ncp_hal_rig_zero_cart(&s_zero_x);
             if (s_model != NULL) {
                 ncp_ctrl_reset(&s_ctrl);
             }
@@ -411,7 +411,7 @@ static void handle(const ctrl_cmd_t *c) {
     }
     case CTRL_CMD_RESET_POSE:
         if (HAL_IS_SIM && c->i >= 0 && c->i < (1 << s_model->hdr.n_links)) {
-            hal_sim_reset((int)c->i);
+            ncp_hal_sim_reset((int)c->i);
             ncp_ctrl_reset(&s_ctrl);
             s_offrail_ticks = 0;
             if (s_run == NCP_RUN_FAULT) {
@@ -469,7 +469,7 @@ static void fill_frame(ncp_tlm_frame_t *f, uint32_t exec_us, uint32_t period_mea
         for (int i = 0; i < np && i < NCP_MAX_POS; i++) {
             f->meas[i] = (float)s_pos[i];
         }
-        const double *truth = hal_sim_truth();
+        const double *truth = ncp_hal_sim_truth();
         if (truth != NULL) {
             for (int i = 0; i < sd && i < NCP_MAX_STATE; i++) {
                 f->truth[i] = (float)truth[i];
@@ -481,7 +481,7 @@ static void fill_frame(ncp_tlm_frame_t *f, uint32_t exec_us, uint32_t period_mea
         }
         f->cmd = s_cmd;
         /* sim: the force that acted; rig: the actuator model's estimate when driving */
-        f->applied = (float)(HAL_IS_SIM ? hal_sim_applied()
+        f->applied = (float)(HAL_IS_SIM ? ncp_hal_sim_applied()
                                         : (s_run == NCP_RUN_ARMED ? s_ctrl.est_force : 0.0));
         f->x_ref = (float)s_ctrl.x_ref;
         if (ncp_ctrl_settled(&s_ctrl)) {
@@ -554,11 +554,11 @@ static void tick(int64_t t0, uint32_t period_meas, uint32_t missed) {
     double out = 0.0;
     if (s_model == NULL) {
 #if !HAL_IS_SIM
-        read_ok = hal_read(s_pos); /* readings (and recordings) work without a model */
+        read_ok = ncp_hal_read(s_pos); /* readings (and recordings) work without a model */
 #endif
-        hal_apply(false, 0.0);
+        ncp_hal_apply(false, 0.0);
     } else {
-        read_ok = hal_read(s_pos);
+        read_ok = ncp_hal_read(s_pos);
         /* Excitation only while armed (it advances only then), capped at the manual cap. */
         s_ext = 0.0;
         if (s_exc_on && s_run == NCP_RUN_ARMED) {
@@ -571,13 +571,13 @@ static void tick(int64_t t0, uint32_t period_meas, uint32_t missed) {
         s_cmd = (float)cmd_n;
 
         /* Safety, before anything reaches the drive. */
-        const bool off_rail = hal_off_rail(s_pos, x_lim());
+        const bool off_rail = ncp_hal_off_rail(s_pos, x_lim());
         if (s_run == NCP_RUN_ARMED) {
-            if (hal_estop()) {
+            if (ncp_hal_estop()) {
                 trip(CTRL_FAULT_ESTOP);
             } else if (off_rail) {
                 trip(CTRL_FAULT_OFF_RAIL);
-            } else if (!read_ok && hal_read_errors() >= ENC_ERROR_LIMIT) {
+            } else if (!read_ok && ncp_hal_read_errors() >= ENC_ERROR_LIMIT) {
                 trip(CTRL_FAULT_ENCODER);
             }
 #if !HAL_IS_SIM
@@ -591,12 +591,12 @@ static void tick(int64_t t0, uint32_t period_meas, uint32_t missed) {
         }
         const bool armed = s_run == NCP_RUN_ARMED;
         out = armed ? cmd_n : 0.0;
-        hal_apply(armed, out);
+        ncp_hal_apply(armed, out);
 
 #if HAL_IS_SIM
         if (off_rail) {
             if (++s_offrail_ticks >= (int)lround(OFFRAIL_RESET_S / s_model->hdr.dt)) {
-                hal_sim_reset(all_down());
+                ncp_hal_sim_reset(all_down());
                 ncp_ctrl_reset(&s_ctrl);
                 s_offrail_ticks = 0;
             }

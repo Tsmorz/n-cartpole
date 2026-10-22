@@ -8,7 +8,7 @@
  * {"zero": "angles"} (links hanging at rest) sets th1 = pi, phi = 0.
  * Cart: x = sign * count * 2 pi r / cpr - x_zero; {"zero": "cart"} sets x = 0 here.
  *
- * hal_init runs on core 0 (PCNT's overflow interrupt lands there); the SPI reads are
+ * ncp_hal_init runs on core 0 (PCNT's overflow interrupt lands there); the SPI reads are
  * polling transactions issued from the control task on core 1 (no interrupt, no DMA). */
 #include "sdkconfig.h"
 
@@ -68,7 +68,7 @@ static pcnt_unit_handle_t s_pcnt;
 static double s_off1, s_off2 = 0.0, s_x_zero;
 static bool s_normalized; /* first reading wrapped into [-pi, pi) */
 static uint32_t s_errors;
-static bool s_hw_ok; /* hal_init succeeded: never touch half-initialized drivers from core 1 */
+static bool s_hw_ok; /* ncp_hal_init succeeded: never touch half-initialized drivers from core 1 */
 static double s_last[3]; /* last good [x, th1, th2] */
 
 /* ---------- force drive ----------
@@ -295,7 +295,7 @@ static double cart_x_raw(void) {
 
 /* ---------- HAL ---------- */
 
-esp_err_t hal_init(void) {
+esp_err_t ncp_hal_init(void) {
     ESP_RETURN_ON_ERROR(s_drive->init(), TAG, "drive");
     ESP_RETURN_ON_ERROR(enc_init(), TAG, "joint encoders");
     ESP_RETURN_ON_ERROR(cart_init(), TAG, "cart encoder");
@@ -319,9 +319,9 @@ esp_err_t hal_init(void) {
     return ESP_OK;
 }
 
-void hal_set_model(const ncp_header_t *h) { (void)h; }
+void ncp_hal_set_model(const ncp_header_t *h) { (void)h; }
 
-bool hal_read(double *pos) {
+bool ncp_hal_read(double *pos) {
     if (!s_hw_ok) {
         s_errors++;
         memcpy(pos, s_last, sizeof(s_last));
@@ -356,9 +356,9 @@ bool hal_read(double *pos) {
     return true;
 }
 
-uint32_t hal_read_errors(void) { return s_errors; }
+uint32_t ncp_hal_read_errors(void) { return s_errors; }
 
-void hal_apply(bool armed, double force) {
+void ncp_hal_apply(bool armed, double force) {
     if (!s_hw_ok) {
         return;
     }
@@ -368,7 +368,7 @@ void hal_apply(bool armed, double force) {
     }
 }
 
-bool hal_estop(void) {
+bool ncp_hal_estop(void) {
 #if CONFIG_NCP_ESTOP_GPIO >= 0
     return gpio_get_level(CONFIG_NCP_ESTOP_GPIO) == 1;
 #else
@@ -376,29 +376,29 @@ bool hal_estop(void) {
 #endif
 }
 
-bool hal_off_rail(const double *pos, double x_lim) { return fabs(pos[0]) > x_lim; }
+bool ncp_hal_off_rail(const double *pos, double x_lim) { return fabs(pos[0]) > x_lim; }
 
-void hal_sim_reset(int goal) { (void)goal; }
-const double *hal_sim_truth(void) { return NULL; }
-double hal_sim_applied(void) { return 0.0; }
+void ncp_hal_sim_reset(int goal) { (void)goal; }
+const double *ncp_hal_sim_truth(void) { return NULL; }
+double ncp_hal_sim_applied(void) { return 0.0; }
 
-void hal_rig_zero_angles(double *off1, double *off2) {
+void ncp_hal_rig_zero_angles(double *off1, double *off2) {
     s_off1 = M_PI - ENC1_SIGN * enc_rad(&s_enc[0]);
     s_off2 = -ENC2_SIGN * enc_rad(&s_enc[1]);
     *off1 = s_off1;
     *off2 = s_off2;
 }
 
-void hal_rig_zero_cart(double *x_zero) {
+void ncp_hal_rig_zero_cart(double *x_zero) {
     s_x_zero = s_hw_ok ? cart_x_raw() : 0.0;
     *x_zero = s_x_zero;
 }
 
-void hal_rig_set_angle_offsets(double off1, double off2) {
+void ncp_hal_rig_set_angle_offsets(double off1, double off2) {
     s_off1 = off1;
     s_off2 = off2;
 }
 
-void hal_rig_set_cart_zero(double x_zero) { s_x_zero = x_zero; }
+void ncp_hal_rig_set_cart_zero(double x_zero) { s_x_zero = x_zero; }
 
 #endif

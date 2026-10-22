@@ -1,6 +1,6 @@
 /* hal_sim.c — the simulator backend: ncp_sim integrates the plant on the chip and
  * produces readings through the model's encoder model. Compiled only for
- * CONFIG_NCP_BACKEND_SIM. Called from the control task except hal_init. */
+ * CONFIG_NCP_BACKEND_SIM. Called from the control task except ncp_hal_init. */
 #include "sdkconfig.h"
 
 #if !CONFIG_NCP_BACKEND_RIG
@@ -15,9 +15,9 @@
 static ncp_sim_t s_sim;
 static bool s_ready;
 
-esp_err_t hal_init(void) { return ESP_OK; }
+esp_err_t ncp_hal_init(void) { return ESP_OK; }
 
-void hal_set_model(const ncp_header_t *h) {
+void ncp_hal_set_model(const ncp_header_t *h) {
     if (h == NULL) {
         s_ready = false;
         return;
@@ -28,7 +28,7 @@ void hal_set_model(const ncp_header_t *h) {
     s_ready = true;
 }
 
-bool hal_read(double *pos) {
+bool ncp_hal_read(double *pos) {
     if (!s_ready) {
         return false;
     }
@@ -36,40 +36,40 @@ bool hal_read(double *pos) {
     return true;
 }
 
-uint32_t hal_read_errors(void) { return 0; }
+uint32_t ncp_hal_read_errors(void) { return 0; }
 
-void hal_apply(bool armed, double force) {
+void ncp_hal_apply(bool armed, double force) {
     if (s_ready) {
         ncp_sim_apply(&s_sim, armed ? force : 0.0);
     }
 }
 
-bool hal_estop(void) { return false; }
+bool ncp_hal_estop(void) { return false; }
 
-bool hal_off_rail(const double *pos, double x_lim) {
+bool ncp_hal_off_rail(const double *pos, double x_lim) {
     (void)pos;
     (void)x_lim;
     return s_ready && ncp_sim_off_rail(&s_sim);
 }
 
-void hal_sim_reset(int goal) {
+void ncp_hal_sim_reset(int goal) {
     if (s_ready) {
         ncp_sim_reset(&s_sim, goal, 0.01);
     }
 }
 
-const double *hal_sim_truth(void) { return s_ready ? s_sim.s : NULL; }
-double hal_sim_applied(void) { return s_ready ? s_sim.applied : 0.0; }
+const double *ncp_hal_sim_truth(void) { return s_ready ? s_sim.s : NULL; }
+double ncp_hal_sim_applied(void) { return s_ready ? s_sim.applied : 0.0; }
 
-void hal_rig_zero_angles(double *off1, double *off2) {
+void ncp_hal_rig_zero_angles(double *off1, double *off2) {
     *off1 = 0.0;
     *off2 = 0.0;
 }
-void hal_rig_zero_cart(double *x_zero) { *x_zero = 0.0; }
-void hal_rig_set_angle_offsets(double off1, double off2) {
+void ncp_hal_rig_zero_cart(double *x_zero) { *x_zero = 0.0; }
+void ncp_hal_rig_set_angle_offsets(double off1, double off2) {
     (void)off1;
     (void)off2;
 }
-void hal_rig_set_cart_zero(double x_zero) { (void)x_zero; }
+void ncp_hal_rig_set_cart_zero(double x_zero) { (void)x_zero; }
 
 #endif

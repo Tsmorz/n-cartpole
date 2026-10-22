@@ -41,19 +41,19 @@ void app_main(void) {
                  model_store_error());
     }
 
-    esp_err_t herr = hal_init();
+    esp_err_t herr = ncp_hal_init();
     if (herr != ESP_OK) {
         ESP_LOGE(TAG, "plant hardware init failed (%s): arming will be refused / fault",
                  esp_err_to_name(herr));
     }
 #if !HAL_IS_SIM
     if (cfg->have_angle_offsets) {
-        hal_rig_set_angle_offsets(cfg->angle_off1, cfg->angle_off2);
+        ncp_hal_rig_set_angle_offsets(cfg->angle_off1, cfg->angle_off2);
     } else {
         ESP_LOGW(TAG, "rig angles not zeroed yet: hang the links at rest and send {\"zero\":\"angles\"}");
     }
     if (cfg->have_cart_zero) {
-        hal_rig_set_cart_zero(cfg->x_zero);
+        ncp_hal_rig_set_cart_zero(cfg->x_zero);
     } else {
         ESP_LOGW(TAG, "cart position not zeroed yet: centre it and send {\"zero\":\"cart\"}");
     }
