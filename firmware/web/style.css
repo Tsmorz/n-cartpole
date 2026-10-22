@@ -587,6 +587,22 @@ table.tasks { width: 100%; border-collapse: collapse; font-family: var(--mono); 
 .link-arrow { font-family: var(--mono); font-size: .78rem; }
 .link-arrow::after { content: " →"; }
 
+/* small conveniences: copy on click, fix-it buttons, "go there" highlight */
+code.copy { cursor: copy; position: relative; }
+code.copy:hover { outline: 1px dashed var(--lav); }
+code.copy.copied::after {
+  content: attr(data-tip); position: absolute; left: 50%; bottom: calc(100% + 4px); transform: translateX(-50%);
+  padding: .05rem .35rem; border-radius: 3px; font-size: .64rem; color: var(--bg); background: var(--text); white-space: nowrap;
+}
+.notice-btn {
+  margin-left: .4rem; padding: .1rem .55rem; font: inherit; font-size: .74rem; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--lime); border-radius: 3px; background: var(--surface); color: var(--text);
+}
+.notice-btn:hover { background: var(--accent-soft); }
+.banner-btn { margin-left: .6rem; padding: .05rem .5rem; font: inherit; cursor: pointer; border: 1px solid var(--viz-2); border-radius: 3px; background: var(--bg); color: var(--text); }
+.flash-hl { outline: 2px solid var(--lime); outline-offset: 3px; transition: outline-color .3s; }
+.kv dd a, .events a { color: var(--accent); }
+
 /* sensors & drive, event log */
 .io-table td:nth-child(4) { white-space: normal; text-align: left; }
 .io-table th:nth-child(4) { text-align: left; }

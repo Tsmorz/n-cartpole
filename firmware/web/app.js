@@ -322,11 +322,62 @@
     }).finally(function () { if (timer) clearTimeout(timer); });
   }
 
+  // A clickable address: http://<ip or host>/ (opens the dashboard there).
+  function addrLink(host) { return host ? '<a href="http://' + esc(host) + '/">' + esc(host) + '</a>' : '—'; }
+  // Escape, then make IPv4 addresses and <name>.local names clickable.
+  function linkify(text) {
+    return esc(text).replace(/\b((?:\d{1,3}\.){3}\d{1,3}|[a-z0-9-]+\.local)\b/gi, function (m) { return addrLink(m); });
+  }
+
+  /* Copy on click: any element with data-copy. navigator.clipboard needs a secure context,
+     which http://cartpole.local is not, so fall back to a hidden textarea + execCommand. */
+  function copyText(t) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t);
+    return new Promise(function (ok, fail) {
+      var a = document.createElement('textarea');
+      a.value = t; a.setAttribute('readonly', ''); a.style.position = 'fixed'; a.style.opacity = '0';
+      document.body.appendChild(a); a.select();
+      try { document.execCommand('copy') ? ok() : fail(new Error('copy refused')); } catch (e) { fail(e); }
+      a.remove();
+    });
+  }
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest && e.target.closest('[data-copy]');
+    if (!el) return;
+    function tip(text) {
+      el.setAttribute('data-tip', text); el.classList.add('copied');
+      setTimeout(function () { el.classList.remove('copied'); }, 1600);
+    }
+    copyText(el.getAttribute('data-copy')).then(function () { tip('copied'); }).catch(function () {
+      // The browser refused: select the text so a keyboard copy takes it.
+      var r = document.createRange(); r.selectNodeContents(el);
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      tip(/Mac|iPhone|iPad/.test(navigator.platform) ? 'press ⌘C' : 'press Ctrl+C');
+    });
+  });
+  function copyCode(t) { return '<code class="copy" data-copy="' + esc(t) + '" title="Click to copy">' + esc(t) + '</code>'; }
+
+  /* "Go there" links: data-goto="tab:element-id" switches tab, scrolls to the element and
+     briefly highlights it (e.g. the Calibrate buttons, the upload drop zone). */
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest && e.target.closest('[data-goto]');
+    if (!el) return;
+    e.preventDefault();
+    var parts = el.getAttribute('data-goto').split(':'), target = parts[1] && $(parts[1]);
+    if (location.hash !== '#' + parts[0]) location.hash = parts[0]; else showTab(parts[0]);
+    if (target) setTimeout(function () {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('flash-hl');
+      setTimeout(function () { target.classList.remove('flash-hl'); }, 1600);
+    }, 60);
+  });
+  function goto(tabAndId, text) { return '<a href="#' + tabAndId.split(':')[0] + '" data-goto="' + tabAndId + '">' + esc(text) + '</a>'; }
+
   var msgTimer = null;
-  function flash(id, text, kind, ms) {
+  function flash(id, text, kind, ms, html) {
     var e = $(id);
     if (!e) return;
-    e.textContent = text;
+    if (html) e.innerHTML = text; else e.textContent = text;
     e.className = 'panel-msg' + (kind ? ' ' + kind : '');
     clearTimeout(msgTimer);
     if (ms !== 0) msgTimer = setTimeout(function () { e.textContent = ''; e.className = 'panel-msg'; }, ms || 4000);
@@ -508,7 +559,7 @@
     if (buf.byteLength < TLM.HDR) return;
     var dv = new DataView(buf), ver = dv.getUint8(0), count = dv.getUint8(1), fs = dv.getUint16(2, true);
     if (ver !== TLM.VERSION || fs < TLM.FRAME) {
-      if (!tlmWarned) { tlmWarned = true; flash('cmd-msg', 'Telemetry v' + ver + ' (' + fs + ' B frames): this page reads v1 — reload it after a firmware update.', 'bad', 0); }
+      if (!tlmWarned) { tlmWarned = true; flash('cmd-msg', 'Telemetry v' + ver + ' (' + fs + ' B frames): this page reads v1 — <a href="" onclick="location.reload();return false">reload it</a> after a firmware update.', 'bad', 0, true); }
       if (fs < TLM.FRAME) return;
     }
     for (var i = 0; i < count; i++) {
@@ -613,7 +664,9 @@
       ['cpu', chip.mhz ? chip.cores + ' × ' + chip.mhz + ' MHz' : null],
       ['flash / psram', chip.flash_mb != null ? chip.flash_mb + ' MB / ' + (chip.psram_mb || 0) + ' MB' : null],
       { head: 'firmware' },
-      ['version', fw.version ? 'v' + fw.version : null, 'accent'],
+      fw.version ? Object.assign(['version', /^\d+\.\d+\.\d+$/.test(fw.version)
+        ? '<a href="https://github.com/' + esc(fw.repo || 'Tsmorz/n-cartpole') + '/releases/tag/fw-v' + esc(fw.version) + '" target="_blank" rel="noopener" title="Release notes">v' + esc(fw.version) + '</a>'
+        : esc('v' + fw.version), 'accent'], { html: true }) : ['version', null],
       ['backend', be ? (be === 'rig' ? 'rig (motor drive)' : 'sim (plant on the chip)') : null],
       ['esp-idf', fw.idf],
       ['built', fw.built],
@@ -647,7 +700,11 @@
     var why = get(S.info, 'model_error', '');
     if (!m && st !== 'loading') {
       kv('model-kv', [['model', 'none stored', 'bad'], why ? ['rejected', why, 'bad', 'The stored blob failed validation at boot'] : null,
-        { head: 'to add one' }, ['export', 'task export-firmware'], ['then', 'drop the .ncpm on Update']]);
+        { head: 'to add one' }, ['export', 'task export-firmware'], ['then', 'drop the .ncpm on Update']].filter(Boolean).map(function (r) {
+          if (r[0] === 'export') { r[1] = copyCode('task export-firmware -- --checkpoint <ckpt>'); r.html = true; }
+          if (r[0] === 'then') { r[1] = goto('settings:dropzone', 'drop the .ncpm on Update →'); r.html = true; }
+          return r;
+        }));
     } else {
       m = m || {};
       var G = geom(), dtype = m.dtype || (h ? (h.dtype ? 'f16' : 'f32') : null);
@@ -690,6 +747,7 @@
     if (!h) {
       var why = get(S.info, 'model_error', '');
       e.textContent = st === 'none' ? 'no model on the device' + (why ? ' · stored one rejected: ' + why : '') : st === 'error' ? 'could not load the model: ' + S.model.error : '';
+      if (st === 'none') e.insertAdjacentHTML('beforeend', ' · ' + goto('settings:dropzone', 'upload one →'));
       return;
     }
     var parts = [h.hidden + ' × ' + h.n_blocks + ' blocks', (h.params / 1e6).toFixed(2) + ' M params', h.dtype ? 'f16' : 'f32'];
@@ -755,10 +813,10 @@
     kv('wifi-kv', [
       ['mode', w.mode ? (w.mode === 'ap' ? 'access point' : 'station') : null, 'accent'],
       [w.mode === 'ap' ? 'network' : 'joined', w.ssid],
-      ['ip', w.ip],
-      ['mdns', (get(S.info, 'hostname', null) || 'cartpole') + '.local'],
+      ['ip', addrLink(w.ip)],
+      ['mdns', addrLink((get(S.info, 'hostname', null) || 'cartpole') + '.local')],
       w.mode === 'ap' ? null : ['signal', r != null ? bars + esc(r + ' dBm') : '—']
-    ].map(function (row) { if (row && row[0] === 'signal') row.html = true; return row; }));
+    ].map(function (row) { if (row && (row[0] === 'signal' || row[0] === 'ip' || row[0] === 'mdns')) row.html = true; return row; }));
     var wt = $('wifi-tag');
     wt.textContent = w.mode === 'ap' ? 'AP · setup' : w.mode ? 'STA' : '—';
     wt.className = 'tag' + (w.mode === 'ap' ? ' warn' : w.mode ? ' ok' : '');
@@ -869,6 +927,7 @@
     cal = cal || {};
     if (!cal.angles) problems.push('angles not zeroed');
     if (!cal.cart) problems.push('cart not zeroed');
+    var zeroLink = !cal.angles || !cal.cart ? ' ' + goto('live:rig-tools', 'Zero on Live →') : '';
     body.innerHTML =
       '<div class="table-wrap"><table class="tasks io-table" aria-label="Joint encoders"><thead><tr><th scope="col">encoder</th><th scope="col">raw</th><th scope="col">raw angle</th><th scope="col">magnet</th><th scope="col">bad reads</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>' +
       '<dl class="kv">' + [
@@ -881,7 +940,7 @@
       ].map(function (r) {
         return r.head ? '<span class="kv-head">' + esc(r.head) + '</span>' : '<dt>' + esc(r[0]) + '</dt><dd class="' + (r[2] || '') + '">' + esc(r[1]) + '</dd>';
       }).join('') + '</dl>' +
-      (problems.length || warns.length ? '<p class="check-line"><span class="' + (problems.length ? 'bad' : 'warn') + '">' + (problems.length ? '✕' : '!') + '</span> ' + esc(problems.concat(warns).join('; ')) + '</p>'
+      (problems.length || warns.length ? '<p class="check-line"><span class="' + (problems.length ? 'bad' : 'warn') + '">' + (problems.length ? '✕' : '!') + '</span> ' + esc(problems.concat(warns).join('; ')) + zeroLink + '</p>'
         : '<p class="check-line"><span class="ok">✓</span> Encoders read cleanly, the magnets are in range, and both zero references are set.</p>');
     tag.textContent = io.estop ? 'e-stop' : problems.length ? (cal.angles && cal.cart ? 'check sensors' : 'not zeroed') : warns.length ? 'watch' : 'ok';
     tag.className = 'tag ' + (problems.length ? 'bad' : warns.length ? 'warn' : 'ok');
@@ -912,7 +971,7 @@
         html.push('<li class="ev-sep">' + (e.boot === E.boot ? 'this boot' : 'before the reset') + (e.boot != null ? ' · boot #' + e.boot : '') + '</li>');
         prevBoot = e.boot;
       }
-      html.push('<li class="ev ev-' + esc(e.level) + (multi && e.boot !== E.boot ? ' ev-prev' : '') + '"><time title="since that boot">' + clock(e.t_ms) + '</time><span>' + esc(e.msg) + '</span></li>');
+      html.push('<li class="ev ev-' + esc(e.level) + (multi && e.boot !== E.boot ? ' ev-prev' : '') + '"><time title="since that boot">' + clock(e.t_ms) + '</time><span>' + linkify(e.msg) + '</span></li>');
     });
     list.innerHTML = html.join('');
     var nBad = E.list.filter(function (e) { return e.level === 'error'; }).length, nWarn = E.list.filter(function (e) { return e.level === 'warn'; }).length;
@@ -1059,6 +1118,9 @@
       arm.setAttribute('aria-pressed', armed ? 'true' : 'false');
       arm.disabled = !live || run === 'maint' || run == null;
       arm.querySelector('.arm-label').textContent = armed ? 'Armed · disarm' : run === 'fault' ? 'Re-arm' : run === 'maint' ? 'Writing flash…' : 'Arm';
+      var cal = get(S.status, 'calib', null);   // rig: say why arming will be refused before the click
+      arm.title = !armed && cal && !(cal.angles && cal.cart) ? 'The rig refuses to arm until the angles and the cart are zeroed (Live → Calibrate)'
+        : 'Arm sends the commands to the drive. Esc disarms from anywhere on the page.';
     });
     // Header: the controller state, on every tab
     var rc = $('run-chip');
@@ -1856,7 +1918,7 @@
     if (j.state === 'connecting') {
       flash('wifi-msg', 'Joining "' + S.joinWatch + '"… (up to 20 s)', '', 0);
     } else if (j.state === 'ok') {
-      flash('wifi-msg', 'Joined "' + j.ssid + '" at ' + j.ip + '. Put this computer back on that network, then open http://' + host + '/ or http://' + j.ip + '/', 'good', 0);
+      flash('wifi-msg', 'Joined "' + esc(j.ssid) + '" at ' + addrLink(j.ip) + '. Put this computer back on that network, then open ' + addrLink(host) + ' or ' + addrLink(j.ip) + '.', 'good', 0, true);
       S.joinWatch = null;
       $('wifi-save').disabled = false;
     } else if (j.state === 'failed') {
@@ -1881,7 +1943,7 @@
           if (S.joinWatch !== ssid) return;
           S.joinWatch = null;
           $('wifi-save').disabled = false;
-          flash('wifi-msg', 'Lost contact with the device — it probably joined "' + ssid + '". Put this computer back on that network and open http://' + ((get(S.info, 'hostname', null) || 'cartpole') + '.local') + '/ (or look up its IP in your router).', 'good', 0);
+          flash('wifi-msg', 'Lost contact with the device — it probably joined "' + esc(ssid) + '". Put this computer back on that network and open ' + addrLink((get(S.info, 'hostname', null) || 'cartpole') + '.local') + ' (or look up its IP in your router).', 'good', 0, true);
         }, 35000);
       }).catch(function (err) { flash('wifi-msg', err.message, 'bad'); });
   });
@@ -1893,7 +1955,7 @@
     fetchJSON('api/hostname', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hostname: name }) }, 5000)
       .then(function (j) {
         $('host-name').value = '';
-        flash('host-msg', 'Renamed: http://' + (j && j.hostname || name) + '.local/ from now on (this page keeps working where it is).', 'good', 8000);
+        flash('host-msg', 'Renamed: ' + addrLink((j && j.hostname || name) + '.local') + ' from now on (this page keeps working where it is).', 'good', 8000, true);
         loadInfo();
       }).catch(function (err) { flash('host-msg', err.message, 'bad'); });
   });
@@ -1903,7 +1965,7 @@
     var ap = 'cartpole-XXXX';
     if (!window.confirm('Forget the saved Wi-Fi network?\n\nThe device reboots into its setup access point (' + ap + ', http://192.168.4.1/) and this page loses it. Join that access point to set a new network.')) return;
     fetchJSON('api/wifi/forget', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }, 4000).then(function () {
-      flash('host-msg', 'Forgotten. The device is rebooting into its access point ' + ap + ': join it and open http://192.168.4.1/.', 'good', 0);
+      flash('host-msg', 'Forgotten. The device is rebooting into its access point ' + ap + ': join it and open ' + addrLink('192.168.4.1') + '.', 'good', 0, true);
       S.rebooting = { from: get(S.info, 'fw.version', ''), to: get(S.info, 'fw.version', ''), t0: performance.now() };
       setConn('rebooting');
       waitForReboot();
@@ -1952,7 +2014,7 @@
       var on = b.dataset.preset === p.id; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     setText('rec-setup', p.setup);
-    $('rec-ids').innerHTML = '<strong>Identifies:</strong> ' + esc(p.ids) + '. Then offline: <code>task sysid -- recordings/*.ncpr --config config/rig.toml</code>.';
+    $('rec-ids').innerHTML = '<strong>Identifies:</strong> ' + esc(p.ids) + '. Then offline: ' + copyCode('task sysid -- recordings/*.ncpr --config config/rig.toml --out config/rig-fitted.toml') + '.';
     kindFields(); renderRecord(true);
   }
   function kindFields() {
@@ -1987,13 +2049,15 @@
     tag.textContent = !r ? '—' : recording ? '● recording' : st === 'done' ? 'ready to download' : 'idle';
     tag.className = 'tag' + (recording ? ' bad' : st === 'done' ? ' ok' : '');
     // Setup check
-    var w = '';
+    var w = '', fix = null, modeName = preset.mode === 'ai' ? 'AI' : 'Manual';
     if (live && S.run) {
-      if (preset.armed && S.run !== 'armed') w = 'Needs the device armed' + (preset.mode ? ' in ' + (preset.mode === 'ai' ? 'AI' : 'Manual') : '') + ': the excitation only reaches the drive while armed.';
-      else if (preset.armed && preset.mode && S.mode !== preset.mode) w = 'Switch to ' + (preset.mode === 'ai' ? 'AI' : 'Manual') + ' first' + (preset.mode === 'manual' ? ': the PD keeps the cart near the slider while the signal shakes it.' : '.');
-      else if (!preset.armed && S.run === 'armed') w = 'Disarm first: a ring-down is the links swinging freely, with the drive off.';
+      if (preset.armed && preset.mode && S.mode !== preset.mode) { w = 'Switch to ' + modeName + ' first' + (preset.mode === 'manual' ? ': the PD keeps the cart near the slider while the signal shakes it.' : '.'); fix = { mode: preset.mode, label: 'Switch to ' + modeName }; }
+      else if (preset.armed && S.run !== 'armed') { w = 'Needs the device armed' + (preset.mode ? ' in ' + modeName : '') + ': the excitation only reaches the drive while armed.'; fix = { arm: true, label: S.run === 'fault' ? 'Re-arm' : 'Arm' }; }
+      else if (!preset.armed && S.run === 'armed') { w = 'Disarm first: a ring-down is the links swinging freely, with the drive off.'; fix = { arm: false, label: 'Disarm' }; }
     }
-    var we = $('rec-warn'); we.hidden = !w; we.textContent = w;
+    var we = $('rec-warn'); we.hidden = !w;
+    we.innerHTML = esc(w) + (fix ? ' <button class="notice-btn" type="button" id="rec-fix">' + esc(fix.label) + '</button>' : '');
+    if (fix) $('rec-fix').onclick = function () { send(fix.mode ? { mode: fix.mode } : { arm: fix.arm }).catch(function (er) { flash('rec-msg', er.message, 'bad'); }); };
     // Progress
     var cap = r && r.capacity_s ? r.capacity_s : 0, secs = r ? r.seconds || 0 : 0;
     setText('rec-state', !r ? 'no recording yet' : recording ? 'recording' + (r.note ? ' · ' + r.note : '') : st === 'done' ? 'last recording' + (r.note ? ' · ' + r.note : '') : 'idle');

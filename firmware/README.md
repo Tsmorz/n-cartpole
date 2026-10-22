@@ -58,7 +58,10 @@ The header shows the controller state on every tab (click it, or press Esc, to d
 connection drops or the device goes quiet, a banner says so and the live values fade. A tab shows
 a dot when it needs attention (over budget, missed deadlines, a sensor problem, a new error in
 the log, setup mode), and a device in setup mode opens Settings on first load. On a phone the
-controls sit between the scene and the plot.
+controls sit between the scene and the plot. Addresses (the IP, `<host>.local`, the ones in the event log
+and in Wi-Fi messages) are links, `task …` commands copy on click, a released firmware version
+links to its release notes, and hints that ask for something carry the button or link that
+does it (Record's "switch to Manual" / "Arm" / "Disarm", "Zero on Live", "upload one").
 
 `tests/test_dashboard.py` runs the page against `firmware/tools/mock_device.py` (API checks,
 and a Playwright/Chromium pass over every tab at desktop and phone width; `uv run playwright

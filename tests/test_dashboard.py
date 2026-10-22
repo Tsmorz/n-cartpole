@@ -299,6 +299,8 @@ def test_every_tab_renders(sim: Mock, browser: Any, width: int) -> None:
     )
     assert "boot" in _text(page, "#sys-kv")
     assert "clients" not in _text(page, "#wifi-kv")
+    links = page.eval_on_selector_all("#wifi-kv a", "els => els.map(e => e.href)")
+    assert any(h.endswith(".local/") for h in links) and len(links) >= 2, links
     assert page.locator("#stale-banner").is_hidden()
     page.close()
     assert not errors, errors
@@ -332,6 +334,32 @@ def test_rig_sensors_card(rig: Mock, browser: Any) -> None:
         page, "#io-tag"
     )
     rig.cmd({"inject_io": "ok"})
+    page.close()
+    assert not errors, errors
+
+
+def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
+    """Record's setup warning carries a button that does what it asks (mode, then arm)."""
+    sim.cmd({"arm": False})
+    sim.cmd({"mode": "ai"})
+    sim.wait(lambda st: st["run"] != "armed" and st["mode"] == "ai")
+    page, errors = _open(browser, sim.base + "#record")
+    page.click("#rec-presets [data-preset=chirp]")
+    page.wait_for_function(
+        "document.getElementById('rec-fix')?.textContent === 'Switch to Manual'",
+        timeout=5000,
+    )
+    page.click("#rec-fix")
+    page.wait_for_function(
+        "document.getElementById('rec-fix')?.textContent === 'Arm'", timeout=5000
+    )
+    page.click("#rec-fix")
+    page.wait_for_function("document.getElementById('rec-warn').hidden", timeout=5000)
+    st = sim.get("api/status")
+    assert st["run"] == "armed" and st["mode"] == "manual"
+    assert page.locator("#rec-ids code.copy").count() == 1
+    sim.cmd({"arm": False})
+    sim.cmd({"mode": "ai"})
     page.close()
     assert not errors, errors
 
