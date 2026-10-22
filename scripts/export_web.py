@@ -30,6 +30,7 @@ import numpy as np
 import torch
 from loguru import logger
 
+from n_cartpole.deploy.actor_export import actor_tensors
 from n_cartpole.env.cartpole import encode_obs
 from n_cartpole.env.dynamics import step
 from n_cartpole.env.factory import make_env
@@ -65,37 +66,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _actor_tensors(ckpt: dict) -> list[tuple[str, np.ndarray]]:
-    """Return the actor's tensors (float64) with the normalizer folded in."""
-    sd = {k: v.double().numpy() for k, v in ckpt["actor"].items()}
-    mean = ckpt["norm"]["mean"].double().numpy()
-    std = np.sqrt(ckpt["norm"]["var"].double().numpy()) + 1e-8
-
-    # W (x - mu) / sigma + b  ==  (W / sigma) x + (b - (W / sigma) mu)
-    w_in = sd["net.in_proj.weight"] / std
-    b_in = sd["net.in_proj.bias"] - w_in @ mean
-    out: list[tuple[str, np.ndarray]] = [("in_w", w_in), ("in_b", b_in)]
-    n_blocks = len({k.split(".")[2] for k in sd if k.startswith("net.blocks.")})
-    for i in range(n_blocks):
-        p = f"net.blocks.{i}."
-        out += [
-            (f"b{i}_ln_w", sd[p + "norm.weight"]),
-            (f"b{i}_ln_b", sd[p + "norm.bias"]),
-            (f"b{i}_fc1_w", sd[p + "fc1.weight"]),
-            (f"b{i}_fc1_b", sd[p + "fc1.bias"]),
-            (f"b{i}_fc2_w", sd[p + "fc2.weight"]),
-            (f"b{i}_fc2_b", sd[p + "fc2.bias"]),
-        ]
-    out += [
-        ("final_ln_w", sd["net.final_norm.weight"]),
-        ("final_ln_b", sd["net.final_norm.bias"]),
-        # Row 0 is the Gaussian mean; row 1 (log-std) is unused when deterministic.
-        ("out_w", sd["net.out_proj.weight"][:1]),
-        ("out_b", sd["net.out_proj.bias"][:1]),
-    ]
-    return out
-
-
 def main() -> None:
     """Export weights, metadata, and parity fixtures."""
     args = parse_args()
@@ -113,7 +83,7 @@ def main() -> None:
     if p.com is not None or np.any(p.link_inertias(n) != 0.0):
         raise ValueError("the browser port models point-mass links only")
 
-    tensors = _actor_tensors(ckpt)
+    tensors = actor_tensors(ckpt)
     table, blobs, offset = [], [], 0
     for name, arr in tensors:
         half = np.ascontiguousarray(arr, dtype="<f2")

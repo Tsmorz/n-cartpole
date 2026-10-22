@@ -9,9 +9,10 @@ from pathlib import Path
 import torch
 from loguru import logger
 
-from n_cartpole.config import load_tqc_config, rig_summary
+from n_cartpole.config import load_tqc_config, replace_plant, rig_summary
 from n_cartpole.env.cartpole import EnvConfig, RewardShape
 from n_cartpole.env.factory import checkpoint_subdir, links_name
+from n_cartpole.env.goals import goal_labels, parse_goal_weights
 from n_cartpole.env.randomization import PlantRandomization
 from n_cartpole.training.off_policy import TQCConfig, TQCTrainer
 
@@ -297,12 +298,31 @@ def parse_args() -> argparse.Namespace:
         "--smooth-spatial",
     )
     parser.add_argument(
+        "--goal-weights",
+        default=None,
+        help="Fixed goal-sampling weights replacing the adaptive curriculum, e.g. "
+        "'UU=2,DD>UU=3': TO=w scales every transition into TO, FROM>TO=w one "
+        "transition; entries multiply, unlisted ones are 1. The next goal is drawn "
+        "from the goal just reached, so keep weight on the starts you want to "
+        "practise (DD for swing-ups). With --resume it changes the resumed run.",
+    )
+    parser.add_argument(
+        "--actor-from",
+        type=Path,
+        default=None,
+        help="With --resume <teacher>: replace the actor by this (smaller) one, e.g. "
+        "a distilled student, keeping the teacher's critics, temperature and buffer; "
+        "checkpoints go to <student dir>-rl/",
+    )
+    parser.add_argument(
         "--resume",
         type=Path,
         default=None,
         help="Resume from a TQC checkpoint (architecture/env come from the "
         "checkpoint; --steps is the new ABSOLUTE total). Pass tqc_latest.pt to "
-        "also restore the replay buffer.",
+        "also restore the replay buffer. With --config, the config's physics, "
+        "hardware pipeline and [randomize] replace the checkpoint's (fine-tune on a "
+        "fitted plant; checkpoints go to '<run>-<config name>').",
     )
     return parser.parse_args()
 
@@ -339,6 +359,9 @@ def main() -> None:
         raise SystemExit(
             "--init-from needs --goals and cannot be combined with --resume"
         )
+
+    if args.actor_from is not None and args.resume is None:
+        raise SystemExit("--actor-from needs --resume <teacher checkpoint>")
 
     subdir = checkpoint_subdir("tqc", args.goals)
     base_env = EnvConfig()
@@ -383,6 +406,9 @@ def main() -> None:
             max_steps=args.max_steps
             or round((30.0 if args.goals else 10.0) / base_env.physics.dt),
             hold_prob=args.hold_prob,
+            goal_weights=None
+            if args.goal_weights is None
+            else parse_goal_weights(args.goal_weights, args.links),
         ),
         device=args.device,
         hidden=args.hidden,
@@ -440,12 +466,30 @@ def main() -> None:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         if ckpt.get("algo") != "tqc":
             raise SystemExit(f"{args.resume} is not a TQC checkpoint")
+        resume_dir = args.resume.parent
+        if args.actor_from is not None and args.checkpoint_dir is None:
+            # The student's own folder: never overwrite the teacher's run.
+            resume_dir = args.actor_from.parent.with_name(
+                f"{args.actor_from.parent.name}-rl"
+            )
+        elif args.config is not None and args.checkpoint_dir is None:
+            # A new plant: keep the source run's checkpoints untouched.
+            resume_dir = resume_dir.with_name(f"{resume_dir.name}-{args.config.stem}")
         cfg = dataclasses.replace(
             ckpt["cfg"],
             device=args.device,
             total_steps=args.steps,
-            checkpoint_dir=args.checkpoint_dir or args.resume.parent,
+            checkpoint_dir=args.checkpoint_dir or resume_dir,
         )
+        if args.config is not None:  # fine-tune on another plant (e.g. a sysid fit)
+            env, changes = replace_plant(cfg.env, load_tqc_config(args.config).env)
+            cfg = dataclasses.replace(cfg, env=env)
+            logger.info(
+                f"Plant from {args.config} (network, obs layout, goal/action "
+                "settings kept from the checkpoint):\n  "
+                + ("\n  ".join(changes) if changes else "no changes")
+            )
+            logger.info(f"Checkpoints -> {cfg.checkpoint_dir}")
         if args.realism is not None:  # fine-tune the same policy at a new level
             cfg = dataclasses.replace(
                 cfg, env=dataclasses.replace(cfg.env, realism=args.realism)
@@ -453,6 +497,11 @@ def main() -> None:
         if args.force_slew is not None:
             cfg = dataclasses.replace(
                 cfg, env=dataclasses.replace(cfg.env, force_slew=args.force_slew)
+            )
+        if args.goal_weights is not None:
+            weights = parse_goal_weights(args.goal_weights, cfg.env.n_links)
+            cfg = dataclasses.replace(
+                cfg, env=dataclasses.replace(cfg.env, goal_weights=weights)
             )
         cfg = dataclasses.replace(cfg, env=_with_sensor_overrides(cfg.env, args))
         overrides = {
@@ -476,9 +525,21 @@ def main() -> None:
                 realism_ramp_start=args.realism_ramp_start,
                 realism_ramp_steps=args.realism_ramp_steps,
             )
+    if cfg.env.goal_weights is not None:
+        labels = goal_labels(cfg.env.n_links)
+        rows = ["random", *labels]
+        logger.info(
+            "Fixed goal-sampling weights (from \\ to):\n"
+            + "\n".join(
+                f"{rows[r]:>7} " + " ".join(f"{w:5.2f}" for w in row)
+                for r, row in enumerate(cfg.env.goal_weights)
+            )
+        )
     trainer = TQCTrainer(cfg)
     if args.resume is not None:
         trainer.load(args.resume)
+        if args.actor_from is not None:
+            trainer.replace_actor(args.actor_from)
         if args.reset_buffer:
             trainer.buffer.clear()
             logger.info("Replay buffer cleared; learning resumes once it refills")

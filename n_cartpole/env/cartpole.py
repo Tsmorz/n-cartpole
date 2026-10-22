@@ -158,6 +158,12 @@ class EnvConfig:
     goal_hold_steps: tuple[int, int] | None = (400, 800)
     # Oversample (from, to) transitions with a low running success rate.
     goal_curriculum: bool = True
+    # Fixed goal-sampling weights, ``[from + 1][to]`` (row 0 = from a random
+    # start; see ``goals.parse_goal_weights``). When set they REPLACE the adaptive
+    # curriculum: the next goal is drawn from the row of the goal just reached,
+    # so practising ``DD -> UU`` also needs time spent at DD, which a
+    # failure-weighted curriculum starves once DD is always reached.
+    goal_weights: tuple[tuple[float, ...], ...] | None = None
     # "At goal": every link within this angle (rad) of its target and every
     # joint slower than this (rad/s), continuously for ``goal_settle_steps``.
     goal_tol_angle: float = 0.3
@@ -518,6 +524,12 @@ class NPendulumCartpole(gym.Env):
             raise ValueError(
                 "action_mode='delta' needs force_slew and action_history >= 1"
             )
+        if self.cfg.goal_weights is not None:
+            shape = np.shape(self.cfg.goal_weights)
+            if shape != (2**n + 1, 2**n):
+                raise ValueError(
+                    f"goal_weights must be {(2**n + 1, 2**n)} for {n} links, got {shape}"
+                )
         self.set_realism(self.cfg.realism)
         self._prev_energy_potential = 0.0  # energy-shaping potential (see RewardShape)
         # Encoder-style sensing state (see ``SensorModel``): last position reading
@@ -732,8 +744,11 @@ class NPendulumCartpole(gym.Env):
         self.hold_scale[g] = float(np.clip(s, lo, hi))
 
     def _sample_goal(self, frm: int) -> int:
-        """Draw the next goal, oversampling transitions that still fail."""
+        """Draw the next goal: fixed ``goal_weights``, else oversample failures."""
         n_goals = len(self.goal_configs)
+        if self.cfg.goal_weights is not None:
+            w = np.asarray(self.cfg.goal_weights[frm + 1], dtype=np.float64)
+            return int(self.np_random.choice(n_goals, p=w / w.sum()))
         if self.cfg.goal_curriculum:
             p = self.transition_stats.sample_weights(frm)
             return int(self.np_random.choice(n_goals, p=p))

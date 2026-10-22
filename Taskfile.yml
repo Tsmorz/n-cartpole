@@ -72,6 +72,75 @@ tasks:
       - gh release download {{.CLI_ARGS}} --repo Tsmorz/n-cartpole --dir checkpoints --clobber --pattern "*.zip"
       - for f in checkpoints/*.zip; do unzip -o "$f" -d checkpoints && rm "$f"; done
 
+  sysid:
+    desc: "Fit the plant parameters to device recordings (.ncpr); args: task sysid -- recordings/*.ncpr --config config/rig.toml --out config/rig-fitted.toml"
+    cmds:
+      - uv run python scripts/sysid.py {{.CLI_ARGS}}
+
+  distill:
+    desc: "Distill a policy for the firmware; args: task distill -- --help"
+    cmds:
+      - uv run python scripts/distill.py {{.CLI_ARGS}}
+
+  export-firmware:
+    desc: "Export a checkpoint as a firmware model blob (.ncpm); args: task export-firmware -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt"
+    cmds:
+      - uv run python scripts/export_firmware.py {{.CLI_ARGS}}
+
+  fw-build:
+    desc: "Build the ESP32-S3 firmware in the ESP-IDF v5.3.1 Docker image -> firmware/build/{n_cartpole_fw,factory}.bin"
+    cmds:
+      - >-
+        docker run --rm -v "$PWD/firmware:/project" -w /project espressif/idf:v5.3.1
+        sh -c 'idf.py build && cd build && esptool.py --chip esp32s3 merge_bin -o factory.bin @flash_args'
+
+  fw-flash:
+    desc: "First flash over USB (merged factory image at 0x0); args: task fw-flash -- <port> [image] (default firmware/build/factory.bin, or PORT=/IMAGE= vars)"
+    vars:
+      PORT: '{{.PORT | default ""}}'
+      IMAGE: '{{.IMAGE | default "firmware/build/factory.bin"}}'
+    cmds:
+      - |
+        set -- {{.CLI_ARGS}}
+        port="${1:-{{.PORT}}}"
+        image="${2:-{{.IMAGE}}}"
+        if [ -z "$port" ]; then echo "usage: task fw-flash -- <port> [factory.bin]" >&2; exit 1; fi
+        uvx esptool --chip esp32s3 -p "$port" -b 921600 write_flash 0x0 "$image"
+
+  fw-flash-model:
+    desc: "Write a model blob (.ncpm) to the model partition (0x620000) over USB; args: task fw-flash-model -- <port> <model.ncpm>"
+    cmds:
+      - |
+        set -- {{.CLI_ARGS}}
+        if [ $# -lt 2 ]; then echo "usage: task fw-flash-model -- <port> <model.ncpm>" >&2; exit 1; fi
+        uvx esptool --chip esp32s3 -p "$1" -b 921600 write_flash 0x620000 "$2"
+
+  fw-monitor:
+    desc: "Serial console of the device (115200 baud); args: task fw-monitor -- <port>"
+    vars:
+      PORT: '{{.PORT | default ""}}'
+    cmds:
+      - |
+        set -- {{.CLI_ARGS}}
+        port="${1:-{{.PORT}}}"
+        if [ -z "$port" ]; then echo "usage: task fw-monitor -- <port>" >&2; exit 1; fi
+        uvx --from pyserial pyserial-miniterm "$port" 115200
+
+  fw-mock:
+    desc: "Run a stand-in device (same HTTP/WS API, simulated plant) to develop the dashboard; args: task fw-mock -- --help"
+    cmds:
+      - uv run python firmware/tools/mock_device.py {{.CLI_ARGS}}
+
+  fw-release:
+    desc: "Tag and push a firmware release (the firmware workflow builds and publishes it); args: task fw-release -- fw-v0.2.0"
+    cmds:
+      - git tag {{.CLI_ARGS}} && git push origin {{.CLI_ARGS}}
+
+  fw-download:
+    desc: "Download a firmware release into dist/firmware/; args: task fw-download -- fw-v0.2.0"
+    cmds:
+      - gh release download {{.CLI_ARGS}} --repo Tsmorz/n-cartpole --pattern 'n-cartpole-fw-*' --pattern SHA256SUMS --dir dist/firmware --clobber
+
   plot:
     desc: "Render the interactive training dashboard from checkpoints/metrics.csv"
     cmds:
