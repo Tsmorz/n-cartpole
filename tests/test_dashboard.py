@@ -281,6 +281,21 @@ def _open(browser: Any, url: str, width: int = 1440) -> tuple[Any, list[str]]:
     return page, errors
 
 
+def _calm(sim: Mock) -> None:
+    """Disarm, AI mode, plant back at rest hanging down.
+
+    The simulated plant keeps moving while the device is disarmed, as on the real sim backend, so
+    a test that ends with the cart still moving leaves it to drift off the rail (a fault) a moment
+    later. On a slow runner that lands in the next test: the Record warning then offers "Re-arm"
+    instead of "Arm", and arming ends in FAULT. Start every test that arms from rest.
+    """
+    sim.cmd({"arm": False})
+    sim.cmd({"mode": "ai"})
+    sim.cmd({"reset": "DD"})  # also clears an "off rail" fault
+    st = sim.wait(lambda s: s["run"] == "idle" and s["mode"] == "ai", timeout=10)
+    assert st["run"] == "idle", (st["run"], st.get("fault"))
+
+
 def _text(page: Any, sel: str) -> str:
     return str(page.locator(sel).inner_text())
 
@@ -294,7 +309,12 @@ def test_every_tab_renders(sim: Mock, browser: Any, width: int) -> None:
     )
     assert _text(page, "#run-chip-text") in ("IDLE", "ARMED", "FAULT")
     assert "Hz" in _text(page, "#fact-rate")
-    assert page.locator("#ro-rows tr").first.locator("td").first.inner_text() != "—"
+    # The cells stay "—" until the first telemetry frame arrives, which can trail "live" on a
+    # slow runner.
+    page.wait_for_function(
+        "(document.querySelector('#ro-rows tr td')?.textContent ?? '—') !== '—'",
+        timeout=15000,
+    )
     page.click("#tab-btn-health")
     page.wait_for_function(
         "document.querySelector('#dev-kv').textContent.includes('fps')", timeout=15000
@@ -319,6 +339,7 @@ def test_every_tab_renders(sim: Mock, browser: Any, width: int) -> None:
 
 def test_arm_from_record_tab_and_disarm_from_header(sim: Mock, browser: Any) -> None:
     """Record's Arm arms; the header chip disarms."""
+    _calm(sim)
     page, errors = _open(browser, sim.base + "#record")
     page.click(".rec-ctrl [data-arm]")
     page.wait_for_function(
@@ -385,9 +406,7 @@ def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
     click from landing on a stale button, and the page waits allow for the backlog.
     """
     page_wait = 20000
-    sim.cmd({"arm": False})
-    sim.cmd({"mode": "ai"})
-    sim.wait(lambda st: st["run"] != "armed" and st["mode"] == "ai")
+    _calm(sim)
     page, errors = _open(browser, sim.base + "#record")
     page.click("#rec-presets [data-preset=chirp]")
     _wait_page(
