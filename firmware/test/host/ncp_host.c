@@ -143,6 +143,14 @@ static void print_arr(const char *key, const double *v, int n) {
     printf("\n");
 }
 
+/* The blob header is packed, so its double arrays may be unaligned: copy before printing (gcc
+ * rejects `-Waddress-of-packed-member` under -Werror; the void * parameter is exempt). */
+static void print_packed(const char *key, const void *packed, int n) {
+    double v[NCP_MAX_LINKS];
+    memcpy(v, packed, sizeof(double) * (size_t)n);
+    print_arr(key, v, n);
+}
+
 static void cmd_info(void) {
     const ncp_header_t *h = &g_model.hdr;
     const int n = h->n_links;
@@ -157,11 +165,11 @@ static void cmd_info(void) {
     printf("M=%.17g\ng=%.17g\nb=%.17g\ncart_coulomb=%.17g\ncart_coulomb_vscale=%.17g\n"
            "v_noload=%.17g\n",
            h->M, h->g, h->b, h->cart_coulomb, h->cart_coulomb_vscale, h->v_noload);
-    print_arr("masses", h->masses, n);
-    print_arr("lengths", h->lengths, n);
-    print_arr("com", h->com, n);
-    print_arr("inertia", h->inertia, n);
-    print_arr("joint_friction", h->joint_friction, n);
+    print_packed("masses", h->masses, n);
+    print_packed("lengths", h->lengths, n);
+    print_packed("com", h->com, n);
+    print_packed("inertia", h->inertia, n);
+    print_packed("joint_friction", h->joint_friction, n);
     printf("ekf_force_std=%.17g\nekf_accel_std=%.17g\nvelocity_filter=%.17g\n", h->ekf_force_std,
            h->ekf_accel_std, h->velocity_filter);
     printf("x_noise_std=%.17g\nangle_noise_std=%.17g\nx_resolution=%.17g\nangle_resolution=%.17g\n",
