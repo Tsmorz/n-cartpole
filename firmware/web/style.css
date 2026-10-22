@@ -457,7 +457,10 @@ input[type="range"]:disabled { opacity: .45; cursor: default; }
 .nn-legend-cap { font-family: var(--mono); font-size: .85rem; color: var(--text-muted); line-height: 1; width: 1ch; text-align: center; }
 .nn-legend-txt { font-size: .74rem; color: var(--text-muted); margin-left: .1rem; }
 .su-net-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 3px; }
-.su-net { display: block; width: 100%; height: 310px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg-soft); }
+/* The diagram is drawn in a ~720 x 300 design space and scaled to fit the canvas, so the box follows
+   the diagram's aspect ratio: a fixed height left it height-limited, ~60 % of the width, with empty
+   margins on a wide screen. */
+.su-net { display: block; width: 100%; aspect-ratio: 12 / 5; max-height: 660px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg-soft); }
 .su-net-hint { display: none; margin: .4rem 0 0; font-size: .76rem; color: var(--text-muted); }
 .eqn-note { margin: .55rem 0 0; font-size: .74rem; color: var(--text-muted); font-style: italic; }
 .eqn-note code { font-style: normal; }
@@ -691,7 +694,7 @@ code.copy.copied::after {
   .sim-stack > .sim-cell:last-child { order: 3; height: 300px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
   .card-split { grid-template-columns: minmax(0, 1fr); }
-  .su-net { min-width: 820px; height: 270px; }
+  .su-net { min-width: 820px; height: 270px; aspect-ratio: auto; max-height: none; }
   .su-net-hint { display: block; }
   .site-header { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .head-facts { display: none; }
