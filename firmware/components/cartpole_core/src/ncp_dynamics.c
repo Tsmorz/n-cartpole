@@ -39,83 +39,65 @@ void ncp_dyn_init(ncp_dyn_t *d, const ncp_header_t *h) {
     d->dt = h->dt;
     d->force_max = h->force_max;
     d->v_noload = h->v_noload;
-}
 
-/* Solve A x = r in place (r <- x) for a small symmetric positive-definite A
- * (Cholesky, A destroyed). The mass matrix is SPD for every configuration. */
-static void solve_spd(double A[NCP_MAX_POS][NCP_MAX_POS], double *r, int n) {
+    ncp_dynf_t *f = &d->f;
+    f->n = n;
+    f->m00 = (float)d->m00;
+    f->b = (float)d->b;
+    f->g = (float)d->g;
+    f->coulomb = (float)d->coulomb;
+    f->coulomb_vscale = (float)d->coulomb_vscale;
     for (int j = 0; j < n; j++) {
-        double s = A[j][j];
-        for (int k = 0; k < j; k++) s -= A[j][k] * A[j][k];
-        const double ljj = sqrt(s);
-        A[j][j] = ljj;
-        for (int i = j + 1; i < n; i++) {
-            double t = A[i][j];
-            for (int k = 0; k < j; k++) t -= A[i][k] * A[j][k];
-            A[i][j] = t / ljj;
+        f->a[j] = (float)d->a[j];
+        f->fric[j] = (float)d->fric[j];
+        for (int k = 0; k < n; k++) {
+            f->K[j][k] = (float)d->K[j][k];
+            f->Kd[j][k] = (float)d->Kd[j][k];
         }
-    }
-    for (int i = 0; i < n; i++) { /* L y = r */
-        double t = r[i];
-        for (int k = 0; k < i; k++) t -= A[i][k] * r[k];
-        r[i] = t / A[i][i];
-    }
-    for (int i = n - 1; i >= 0; i--) { /* L^T x = y */
-        double t = r[i];
-        for (int k = i + 1; k < n; k++) t -= A[k][i] * r[k];
-        r[i] = t / A[i][i];
     }
 }
 
-void ncp_dyn_deriv(const ncp_dyn_t *d, const double *s, double F, double *out) {
-    const int n = d->n;
-    const double xd = s[1];
-    double c[NCP_MAX_LINKS], sn[NCP_MAX_LINKS], thd[NCP_MAX_LINKS], thd2[NCP_MAX_LINKS];
-    for (int k = 0; k < n; k++) {
-        const double th = s[2 + 2 * k];
-        c[k] = cos(th);
-        sn[k] = sin(th);
-        thd[k] = s[3 + 2 * k];
-        thd2[k] = thd[k] * thd[k];
-    }
+/* Double precision: the reference. */
+#define REAL double
+#define DYN_T ncp_dyn_t
+#define SOLVE solve_spd
+#define DERIV ncp_dyn_deriv
+#define ZERO 0.0
+#define SIN sin
+#define COS cos
+#define TANH tanh
+#define SQRT sqrt
+#include "ncp_dyn_deriv.inc"
+#undef REAL
+#undef DYN_T
+#undef SOLVE
+#undef DERIV
+#undef ZERO
+#undef SIN
+#undef COS
+#undef TANH
+#undef SQRT
 
-    double A[NCP_MAX_POS][NCP_MAX_POS];
-    double r[NCP_MAX_POS];
-    A[0][0] = d->m00;
-    double r0 = F - d->b * xd;
-    double cent = 0.0;
-    for (int k = 0; k < n; k++) {
-        const double ck = d->a[k] * c[k];
-        A[0][k + 1] = ck;
-        A[k + 1][0] = ck;
-        cent += d->a[k] * sn[k] * thd2[k];
-    }
-    r0 += cent;
-    if (d->coulomb > 0.0) r0 -= d->coulomb * tanh(xd / d->coulomb_vscale);
-    r[0] = r0;
-
-    for (int k = 0; k < n; k++) {
-        double cor = 0.0;
-        for (int j = 0; j < n; j++) {
-            /* cos(th_j - th_k), sin(th_j - th_k) by the angle-difference identities */
-            const double cjk = c[j] * c[k] + sn[j] * sn[k];
-            A[j + 1][k + 1] = d->Kd[j][k] * cjk;
-            if (j != k) cor += d->K[j][k] * (sn[j] * c[k] - c[j] * sn[k]) * thd2[j];
-        }
-        const double omega = thd[k] - (k > 0 ? thd[k - 1] : 0.0);
-        double fric = -d->fric[k] * omega;
-        if (k + 1 < n) fric += d->fric[k + 1] * (thd[k + 1] - thd[k]);
-        r[k + 1] = d->a[k] * d->g * sn[k] + cor + fric;
-    }
-
-    solve_spd(A, r, n + 1);
-    out[0] = xd;
-    out[1] = r[0];
-    for (int k = 0; k < n; k++) {
-        out[2 + 2 * k] = thd[k];
-        out[3 + 2 * k] = r[k + 1];
-    }
-}
+/* Single precision: same equations, for the EKF on the chip. */
+#define REAL float
+#define DYN_T ncp_dynf_t
+#define SOLVE solve_spd_f
+#define DERIV ncp_dynf_deriv
+#define ZERO 0.0f
+#define SIN sinf
+#define COS cosf
+#define TANH tanhf
+#define SQRT sqrtf
+#include "ncp_dyn_deriv.inc"
+#undef REAL
+#undef DYN_T
+#undef SOLVE
+#undef DERIV
+#undef ZERO
+#undef SIN
+#undef COS
+#undef TANH
+#undef SQRT
 
 void ncp_dyn_step(const ncp_dyn_t *d, double *s, double F, int substeps) {
     const int dim = 2 + 2 * d->n;

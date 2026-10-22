@@ -385,7 +385,10 @@ class Device:
         self.ota_running, self.ota_next, self.ota_state = "ota_0", "ota_1", "valid"
         self.pending_until = 0.0
         self.wifi = {
-            "mode": "sta", "ssid": "workshop", "ip": args.host, "rssi": -52,
+            "mode": "sta",
+            "ssid": "workshop",
+            "ip": args.host,
+            "rssi": -52,
             "join": {"state": "idle", "ssid": "", "ip": "", "error": ""},
         }
 
@@ -1073,13 +1076,16 @@ class Device:
 
     # -- joining a Wi-Fi network (no reboot; an SSID containing "wrong" fails) --
     def start_join(self, ssid: str, password: str) -> None:
+        """Simulate POST /api/wifi: connecting, then ok or failed, then the AP closes."""
         join = self.wifi["join"]
         join.update(state="connecting", ssid=ssid, ip="", error="")
 
         def go() -> None:
             time.sleep(2.0)
             if "wrong" in ssid.lower():
-                join.update(state="failed", error="authentication failed (wrong password?)")
+                join.update(
+                    state="failed", error="authentication failed (wrong password?)"
+                )
                 return
             join.update(state="ok", ip="192.168.1.77")
             time.sleep(5.0)

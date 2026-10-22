@@ -1,4 +1,10 @@
-/* ncp_ekf.h — n_cartpole/env/estimator.py StateEKF, double precision.
+/* ncp_ekf.h — n_cartpole/env/estimator.py StateEKF.
+ *
+ * Working precision is a compile-time choice: double (default; the host tests hold it to
+ * the Python filter at 1e-8) or, with NCP_EKF_FLOAT=1 (the firmware build), single, since
+ * the ESP32-S3's FPU is single precision and emulated double costs ~10-30x. The float
+ * build takes the Jacobian step eps = 1e-3 (1e-6 is below float resolution) and
+ * symmetrizes P; the public estimate `x` and the interface stay double either way.
  *
  * Midpoint prediction under the applied force, central-difference Jacobian
  * (eps 1e-6) of the continuous dynamics, F = I + dt A + dt^2/2 A^2, process
@@ -13,14 +19,23 @@
 extern "C" {
 #endif
 
+#ifndef NCP_EKF_FLOAT
+#define NCP_EKF_FLOAT 0
+#endif
+#if NCP_EKF_FLOAT
+typedef float ncp_ekf_real;
+#else
+typedef double ncp_ekf_real;
+#endif
+
 typedef struct {
     const ncp_dyn_t *dyn;
     int n, dim;
     double dt;
-    double x[NCP_MAX_STATE];
-    double P[NCP_MAX_STATE][NCP_MAX_STATE];
-    double R[NCP_MAX_POS]; /* diagonal measurement variance */
-    double q_vel[NCP_MAX_POS];
+    double x[NCP_MAX_STATE]; /* the estimate (always double) */
+    ncp_ekf_real P[NCP_MAX_STATE][NCP_MAX_STATE];
+    ncp_ekf_real R[NCP_MAX_POS]; /* diagonal measurement variance */
+    ncp_ekf_real q_vel[NCP_MAX_POS];
 } ncp_ekf_t;
 
 /* pos_std: n + 1 reading stds [x, th0, ...] (noise and quantization combined). */

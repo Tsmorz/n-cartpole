@@ -14,3 +14,6 @@ idf_component_register(
 # -O2 rather than the IDF default -Os for the per-tick paths; no -ffast-math
 # (it would break the bit-level parity with numpy/torch the tests rely on).
 target_compile_options(${COMPONENT_LIB} PRIVATE -O2 -Wall -Wextra)
+# The ESP32-S3 FPU is single precision (double is emulated in software): run the EKF in
+# float on the chip. PUBLIC so every user of ncp_ekf_t sees the same struct layout.
+target_compile_definitions(${COMPONENT_LIB} PUBLIC NCP_EKF_FLOAT=1)

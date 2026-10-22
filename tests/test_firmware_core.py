@@ -45,9 +45,7 @@ def _compiler() -> str | None:
     return None
 
 
-@pytest.fixture(scope="module")
-def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Compile the core + harness; return the binary."""
+def _build_host(tmp_path_factory: pytest.TempPathFactory, *defines: str) -> Path:
     cc = _compiler()
     if cc is None:
         pytest.skip("no C compiler found")
@@ -60,6 +58,7 @@ def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "-Wall",
         "-Wextra",
         "-Werror",
+        *defines,
         f"-I{CORE / 'include'}",
         *srcs,
         str(HARNESS),
@@ -70,6 +69,18 @@ def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr
     return out
+
+
+@pytest.fixture(scope="module")
+def host(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Compile the core + harness (double-precision EKF, as the parity tests need)."""
+    return _build_host(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def host_float(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Compile the core with the single-precision EKF the firmware uses (NCP_EKF_FLOAT=1)."""
+    return _build_host(tmp_path_factory, "-DNCP_EKF_FLOAT=1")
 
 
 @pytest.fixture(scope="module")
@@ -489,6 +500,35 @@ def test_sim_closed_loop_and_bench(host: Path, blob: Path) -> None:
     assert float(bench["ctrl_us"]) > 0 and int(bench["iters"]) == 50
     rows = _run(host, blob, "simcmd", "3", "0", "1", stdin=_fmt([[15.0]] * 400))
     assert int(rows[-1][-1]) == 1
+
+
+@pytest.mark.parametrize("noise_scale", [1.0, 20.0])
+def test_ekf_float_close_to_python(
+    host_float: Path, blob: Path, bundle: PolicyBundle, noise_scale: float
+) -> None:
+    """The single-precision EKF (the firmware build) stays close to StateEKF over a long run."""
+    p = bundle.physics
+    hw = bundle.env_config.hardware
+    assert hw is not None and hw.sensors is not None
+    sen = hw.sensors
+    noise = np.array([sen.x_noise_std] + [sen.angle_noise_std] * 2)
+    res = np.array([sen.x_resolution] + [sen.angle_resolution] * 2)
+    pos_std = np.maximum(np.sqrt(noise**2 + res**2 / 12.0), 1e-6)
+    rng = np.random.default_rng(11)
+    forces, readings = _ekf_trajectory(p, rng, 600, noise_scale * pos_std)
+    ekf = StateEKF(
+        p, 2, pos_std, force_std=sen.ekf_force_std, accel_std=sen.ekf_accel_std
+    )
+    ref = np.array(
+        [ekf.reset(readings[0])]
+        + [ekf.update(f, r) for f, r in zip(forces[:-1], readings[1:], strict=True)]
+    )
+    rows = [readings[0]] + [
+        np.concatenate(([f], r)) for f, r in zip(forces[:-1], readings[1:], strict=True)
+    ]
+    out = _floats(_run(host_float, blob, "ekf", stdin=_fmt(rows)))
+    # Measured max error: 2e-3 (rad/s, at 20x noise) on velocities of 3-5 rad/s.
+    np.testing.assert_allclose(out, ref, rtol=1e-3, atol=5e-3)
 
 
 # --- excitation, ext_force, recordings ---------------------------------------------

@@ -15,6 +15,17 @@
 extern "C" {
 #endif
 
+/* Single-precision copy of the coefficients, for ncp_dynf_deriv (the EKF on the chip). */
+typedef struct {
+    int n;
+    float m00;
+    float a[NCP_MAX_LINKS];
+    float Kd[NCP_MAX_LINKS][NCP_MAX_LINKS];
+    float K[NCP_MAX_LINKS][NCP_MAX_LINKS];
+    float fric[NCP_MAX_LINKS];
+    float b, g, coulomb, coulomb_vscale;
+} ncp_dynf_t;
+
 typedef struct {
     int n;           /* links */
     double M;        /* cart mass (PhysicsParams.M) */
@@ -25,6 +36,7 @@ typedef struct {
     double fric[NCP_MAX_LINKS];
     double b, g, coulomb, coulomb_vscale;
     double dt, force_max, v_noload; /* v_noload <= 0: no speed limit */
+    ncp_dynf_t f;    /* the same model in float, filled by ncp_dyn_init */
 } ncp_dyn_t;
 
 /* Nominal model from a blob header (com/inertia as exported). */
@@ -32,6 +44,9 @@ void ncp_dyn_init(ncp_dyn_t *d, const ncp_header_t *h);
 
 /* d(state)/dt under cart force F — dynamics._ode. */
 void ncp_dyn_deriv(const ncp_dyn_t *d, const double *s, double F, double *out);
+
+/* The same right-hand side in single precision (same source, see ncp_dyn_deriv.inc). */
+void ncp_dynf_deriv(const ncp_dynf_t *d, const float *s, float F, float *out);
 
 /* Advance `s` by one control period dt with fixed-step RK4 (`substeps` steps of
  * dt / substeps), F clipped to +-force_max. Python integrates with RK45 at
