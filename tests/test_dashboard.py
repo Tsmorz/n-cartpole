@@ -350,6 +350,32 @@ def test_rig_sensors_card(rig: Mock, browser: Any) -> None:
     assert not errors, errors
 
 
+def _wait_page(
+    page: Any, sim: Mock, expr: str, what: str, timeout: int = 20000
+) -> None:
+    """Wait for ``expr`` on the page; on a timeout say what the page and the device look like.
+
+    A bare Playwright timeout names no cause, and the failure only shows on CI.
+    """
+    try:
+        page.wait_for_function(expr, timeout=timeout)
+    except Exception as e:
+        dom = page.evaluate(
+            """() => ({
+                conn: document.getElementById('conn')?.dataset.state,
+                connText: document.getElementById('conn-text')?.textContent,
+                run: document.getElementById('run-chip-text')?.textContent,
+                warn: document.getElementById('rec-warn')?.innerText,
+                fix: document.getElementById('rec-fix')?.textContent,
+                hash: location.hash,
+                banner: [...document.querySelectorAll('.stale, .stale-banner, [role=alert]')].filter((e) => e.offsetParent).map((e) => e.innerText).join(' | '),
+            })"""
+        )
+        st = sim.get("api/status")
+        dev = {k: st.get(k) for k in ("run", "mode", "fault", "events_seq")}
+        raise AssertionError(f"{what}: page={dom} device={dev}") from e
+
+
 def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
     """Record's setup warning carries a button that does what it asks (mode, then arm).
 
@@ -364,20 +390,31 @@ def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
     sim.wait(lambda st: st["run"] != "armed" and st["mode"] == "ai")
     page, errors = _open(browser, sim.base + "#record")
     page.click("#rec-presets [data-preset=chirp]")
-    page.wait_for_function(
+    _wait_page(
+        page,
+        sim,
         "document.getElementById('rec-fix')?.textContent === 'Switch to Manual'",
-        timeout=page_wait,
+        "waiting for the 'Switch to Manual' button",
+        page_wait,
     )
     page.click("#rec-fix")
     assert sim.wait(lambda st: st["mode"] == "manual", timeout=10)["mode"] == "manual"
-    page.wait_for_function(
-        "document.getElementById('rec-fix')?.textContent === 'Arm'", timeout=page_wait
+    _wait_page(
+        page,
+        sim,
+        "document.getElementById('rec-fix')?.textContent === 'Arm'",
+        "waiting for the 'Arm' button after the device switched to manual",
+        page_wait,
     )
     page.click("#rec-fix")
     st = sim.wait(lambda st: st["run"] == "armed", timeout=10)
     assert st["run"] == "armed" and st["mode"] == "manual"
-    page.wait_for_function(
-        "document.getElementById('rec-warn').hidden", timeout=page_wait
+    _wait_page(
+        page,
+        sim,
+        "document.getElementById('rec-warn').hidden",
+        "waiting for the setup warning to clear after arming",
+        page_wait,
     )
     assert page.locator("#rec-ids code.copy").count() == 1
     sim.cmd({"arm": False})
