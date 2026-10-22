@@ -95,17 +95,9 @@ tasks:
         sh -c 'idf.py build && cd build && esptool.py --chip esp32s3 merge_bin -o factory.bin @flash_args'
 
   fw-flash:
-    desc: "First flash over USB (merged factory image at 0x0); args: task fw-flash -- <port> [image] (default firmware/build/factory.bin, or PORT=/IMAGE= vars)"
-    vars:
-      PORT: '{{.PORT | default ""}}'
-      IMAGE: '{{.IMAGE | default "firmware/build/factory.bin"}}'
+    desc: "Flash a merged factory image over USB, keeping the saved Wi-Fi network (NVS); args: task fw-flash -- <port> [image] [--erase-settings] (default firmware/build/factory.bin)"
     cmds:
-      - |
-        set -- {{.CLI_ARGS}}
-        port="${1:-{{.PORT}}}"
-        image="${2:-{{.IMAGE}}}"
-        if [ -z "$port" ]; then echo "usage: task fw-flash -- <port> [factory.bin]" >&2; exit 1; fi
-        uvx esptool --chip esp32s3 -p "$port" -b 921600 write_flash 0x0 "$image"
+      - uv run python firmware/tools/flash.py {{.CLI_ARGS}}
 
   fw-flash-model:
     desc: "Write a model blob (.ncpm) to the model partition (0x620000) over USB; args: task fw-flash-model -- <port> <model.ncpm>"
