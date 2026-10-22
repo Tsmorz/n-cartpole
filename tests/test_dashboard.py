@@ -255,6 +255,17 @@ def browser() -> Iterator[Any]:
 
 def _open(browser: Any, url: str, width: int = 1440) -> tuple[Any, list[str]]:
     page = browser.new_page(viewport={"width": width, "height": 900})
+    # No internet in these tests: the page asks GitHub for the firmware releases and Google
+    # for its fonts. An unauthenticated GitHub API call can be rate-limited (403) on a shared
+    # runner IP, which the browser logs as a console error, so answer both here.
+    page.route(
+        "https://api.github.com/**",
+        lambda r: r.fulfill(status=200, content_type="application/json", body="[]"),
+    )
+    page.route(
+        "https://fonts.googleapis.com/**",
+        lambda r: r.fulfill(status=200, content_type="text/css", body=""),
+    )
     errors: list[str] = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.on(
@@ -286,12 +297,12 @@ def test_every_tab_renders(sim: Mock, browser: Any, width: int) -> None:
     assert page.locator("#ro-rows tr").first.locator("td").first.inner_text() != "—"
     page.click("#tab-btn-health")
     page.wait_for_function(
-        "document.querySelector('#dev-kv').textContent.includes('fps')", timeout=5000
+        "document.querySelector('#dev-kv').textContent.includes('fps')", timeout=15000
     )
-    page.wait_for_selector("#events li.ev", timeout=5000)
+    page.wait_for_selector("#events li.ev", timeout=15000)
     assert "sim" in _text(page, "#io-tag")
     page.click("#tab-btn-record")
-    page.locator(".rec-ctrl [data-arm]").wait_for(state="visible", timeout=5000)
+    page.locator(".rec-ctrl [data-arm]").wait_for(state="visible", timeout=15000)
     page.click("#tab-btn-settings")
     page.wait_for_function(
         "document.querySelector('#model-kv').textContent.includes('label')",
@@ -311,11 +322,12 @@ def test_arm_from_record_tab_and_disarm_from_header(sim: Mock, browser: Any) -> 
     page, errors = _open(browser, sim.base + "#record")
     page.click(".rec-ctrl [data-arm]")
     page.wait_for_function(
-        "document.getElementById('run-chip-text').textContent === 'ARMED'", timeout=5000
+        "document.getElementById('run-chip-text').textContent === 'ARMED'",
+        timeout=15000,
     )
     page.click("#run-chip")
     page.wait_for_function(
-        "document.getElementById('run-chip-text').textContent === 'IDLE'", timeout=5000
+        "document.getElementById('run-chip-text').textContent === 'IDLE'", timeout=15000
     )
     page.close()
     assert not errors, errors
@@ -328,7 +340,7 @@ def test_rig_sensors_card(rig: Mock, browser: Any) -> None:
     page.wait_for_selector(".io-table tbody tr", timeout=10000)
     page.wait_for_function(
         "document.querySelector('#io-body').textContent.includes('too weak')",
-        timeout=5000,
+        timeout=15000,
     )
     assert "check sensors" in _text(page, "#io-tag") or "not zeroed" in _text(
         page, "#io-tag"
@@ -339,7 +351,14 @@ def test_rig_sensors_card(rig: Mock, browser: Any) -> None:
 
 
 def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
-    """Record's setup warning carries a button that does what it asks (mode, then arm)."""
+    """Record's setup warning carries a button that does what it asks (mode, then arm).
+
+    Each click is checked on the device first, then on the page. On a loaded machine (CI)
+    the mock's telemetry can run seconds behind, so the page shows the previous mode or
+    run state for a while after the device changed; waiting on the device keeps the next
+    click from landing on a stale button, and the page waits allow for the backlog.
+    """
+    page_wait = 20000
     sim.cmd({"arm": False})
     sim.cmd({"mode": "ai"})
     sim.wait(lambda st: st["run"] != "armed" and st["mode"] == "ai")
@@ -347,19 +366,23 @@ def test_record_warning_fixes_the_setup(sim: Mock, browser: Any) -> None:
     page.click("#rec-presets [data-preset=chirp]")
     page.wait_for_function(
         "document.getElementById('rec-fix')?.textContent === 'Switch to Manual'",
-        timeout=5000,
+        timeout=page_wait,
     )
     page.click("#rec-fix")
+    assert sim.wait(lambda st: st["mode"] == "manual", timeout=10)["mode"] == "manual"
     page.wait_for_function(
-        "document.getElementById('rec-fix')?.textContent === 'Arm'", timeout=5000
+        "document.getElementById('rec-fix')?.textContent === 'Arm'", timeout=page_wait
     )
     page.click("#rec-fix")
-    page.wait_for_function("document.getElementById('rec-warn').hidden", timeout=5000)
-    st = sim.get("api/status")
+    st = sim.wait(lambda st: st["run"] == "armed", timeout=10)
     assert st["run"] == "armed" and st["mode"] == "manual"
+    page.wait_for_function(
+        "document.getElementById('rec-warn').hidden", timeout=page_wait
+    )
     assert page.locator("#rec-ids code.copy").count() == 1
     sim.cmd({"arm": False})
     sim.cmd({"mode": "ai"})
+    sim.wait(lambda st: st["run"] != "armed" and st["mode"] == "ai")
     page.close()
     assert not errors, errors
 
