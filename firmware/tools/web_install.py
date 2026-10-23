@@ -3,12 +3,19 @@
 
 Writes `manifest.json` and the factory image in two pieces around the nvs partition (as
 `flash.py` does), so installing from the browser keeps the saved Wi-Fi network and the rig's
-zero references. The default output is the personal site's `swingup/real/`, next to the page itself
-(`index.md`, served at `/swingup/real/`), which reads that manifest from its own
+zero references. The default output is the personal site's `controls/swingup/real/`, next to the page itself
+(`index.md`, served at `/controls/swingup/real/`), which reads that manifest from its own
 origin (release downloads send no CORS headers, so the files must live with the page).
 
     task fw-installer -- fw-v0.1.0                      # download the release image
     python firmware/tools/web_install.py path/to/factory.bin 0.1.0
+    task fw-installer -- fw-v0.1.0 --model dist/firmware/<name>-i8.ncpm   # also publish the model
+    task fw-installer -- --model dist/firmware/<name>-i8.ncpm             # only swap the model
+
+The model is not part of a release (the firmware and the model are separate files), so `--model` copies an
+exported `.ncpm` next to the page as `MODEL_NAME`, which the page links for download. What the page shows
+about the firmware and the model (version, model label, size) lives under the manifest's `n_cartpole` key,
+which esp-web-tools ignores.
 """
 
 from __future__ import annotations
@@ -16,11 +23,19 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import shutil
 import urllib.request
 from pathlib import Path
 
 REPO = "Tsmorz/n-cartpole"
-DEFAULT_OUT = Path(__file__).resolve().parents[3] / "personal-site" / "swingup" / "real"
+MODEL_NAME = "n-cartpole-model.ncpm"
+DEFAULT_OUT = (
+    Path(__file__).resolve().parents[3]
+    / "personal-site"
+    / "controls"
+    / "swingup"
+    / "real"
+)
 
 _spec = importlib.util.spec_from_file_location(
     "ncp_flash", Path(__file__).resolve().parent / "flash.py"
@@ -30,8 +45,17 @@ flash = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(flash)
 
 
+def _read_manifest(out: Path) -> dict:
+    """Return the manifest already in `out`, or {} if there is none."""
+    path = out / "manifest.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
 def build(image: Path, version: str, out: Path) -> dict:
-    """Write the manifest and image pieces into `out` (replacing older pieces); return the manifest."""
+    """Write the manifest and image pieces into `out` (replacing older pieces); return the manifest.
+
+    The model info of an earlier run is kept: a new firmware does not change the model.
+    """
     start, end = flash.nvs_range()
     pieces = flash.split_around(image.read_bytes(), start, end)
     out.mkdir(parents=True, exist_ok=True)
@@ -48,8 +72,34 @@ def build(image: Path, version: str, out: Path) -> dict:
         "new_install_prompt_erase": False,
         "builds": [{"chipFamily": "ESP32-S3", "parts": parts}],
     }
+    if info := _read_manifest(out).get("n_cartpole"):
+        manifest["n_cartpole"] = info
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
+
+
+def publish_model(model: Path, out: Path) -> dict:
+    """Copy the `.ncpm` into `out` as MODEL_NAME and record what it is in the manifest; return that record."""
+    from n_cartpole.deploy.firmware_blob import DTYPE_NAMES, read_header
+
+    blob = model.read_bytes()
+    h = read_header(blob)  # raises ValueError for anything the device would refuse
+    info = {
+        "file": MODEL_NAME,
+        "label": h["label"],
+        "dtype": DTYPE_NAMES[h["dtype"]],
+        "hidden": h["hidden"],
+        "blocks": h["n_blocks"],
+        "bytes": len(blob),
+    }
+    manifest = _read_manifest(out)
+    if not manifest:
+        raise SystemExit(f"no manifest.json in {out}: install a firmware release first")
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(model, out / MODEL_NAME)
+    manifest["n_cartpole"] = {**manifest.get("n_cartpole", {}), "model": info}
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return info
 
 
 def download(tag: str, dest: Path) -> tuple[Path, str]:
@@ -65,13 +115,23 @@ def download(tag: str, dest: Path) -> tuple[Path, str]:
 def main() -> None:
     """Parse the arguments and write the files."""
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("source", help="a release tag (fw-v0.1.0) or a local factory.bin")
+    ap.add_argument(
+        "source",
+        nargs="?",
+        help="a release tag (fw-v0.1.0) or a local factory.bin (omit with --model to only swap the model)",
+    )
     ap.add_argument(
         "version", nargs="?", help="version label (required for a local file)"
     )
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument(
+        "--model", type=Path, help="an exported .ncpm to publish next to the page"
+    )
     args = ap.parse_args()
-    if args.source.startswith("fw-v"):
+    if args.source is None:
+        if not args.model:
+            ap.error("give a release tag or image, or --model")
+    elif args.source.startswith("fw-v"):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,8 +141,14 @@ def main() -> None:
         if not args.version:
             ap.error("a local image needs a version")
         manifest = build(Path(args.source), args.version, args.out)
-    for part in manifest["builds"][0]["parts"]:
-        print(f"{args.out / part['path']}  @ 0x{part['offset']:x}")
+    if args.source is not None:
+        for part in manifest["builds"][0]["parts"]:
+            print(f"{args.out / part['path']}  @ 0x{part['offset']:x}")
+    if args.model:
+        info = publish_model(args.model, args.out)
+        print(
+            f"{args.out / MODEL_NAME}  (model {info['label']}, {info['bytes']} bytes)"
+        )
 
 
 if __name__ == "__main__":

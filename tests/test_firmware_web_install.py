@@ -43,3 +43,29 @@ def test_new_release_replaces_old_pieces(tmp_path: Path) -> None:
     web_install.build(src, "0.0.1", out)
     web_install.build(src, "0.0.2", out)
     assert sorted(p.name for p in out.glob("*.bin")) == ["n-cartpole-fw-0.0.2-0.bin"]
+
+
+def test_model_is_published_and_survives_a_new_firmware(tmp_path: Path) -> None:
+    """The page's model link and details outlive a firmware update; an invalid blob is refused."""
+    import pytest
+
+    from n_cartpole.deploy.firmware_blob import export_blob, read_header
+    from tests.firmware_util import make_checkpoint
+
+    model = tmp_path / "model.ncpm"
+    model.write_bytes(export_blob(make_checkpoint(tmp_path / "tqc_5.pt", step=5)))
+    src = tmp_path / "factory.bin"
+    src.write_bytes(b"\x01" * 100)
+    out = tmp_path / "site"
+    web_install.build(src, "0.0.1", out)
+    info = web_install.publish_model(model, out)
+    assert (out / web_install.MODEL_NAME).read_bytes() == model.read_bytes()
+    assert info["label"] == read_header(model.read_bytes())["label"]
+    web_install.build(src, "0.0.2", out)
+    kept = json.loads((out / "manifest.json").read_text())
+    assert kept["version"] == "0.0.2" and kept["n_cartpole"]["model"] == info
+
+    bad = tmp_path / "bad.ncpm"
+    bad.write_bytes(b"not a model")
+    with pytest.raises(ValueError):
+        web_install.publish_model(bad, out)
