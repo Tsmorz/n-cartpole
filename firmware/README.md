@@ -26,11 +26,12 @@ N16R8). **Framework:** ESP-IDF v5.3.1.
    `factory.bin` yourself with `esptool write_flash 0x0` would erase NVS (the image pads it
    with 0xFF). Updating a board that is already set up is easier still: drag the app image onto
    the dashboard (OTA), or `esptool.py write_flash 0x20000 build/n_cartpole_fw.bin`.
-   **From the browser instead:** <https://tsmorz.github.io/swingup/real> (Chrome/Edge, Web Serial;
-   `swingup/real/index.md` in the personal site). It flashes the same image in two pieces around NVS,
+   **From the browser instead:** <https://tsmorz.github.io/controls/swingup/real> (Chrome/Edge, Web Serial;
+   `controls/swingup/real/index.md` in the personal site). It flashes the same image in two pieces around NVS,
    so the saved Wi-Fi network survives. After tagging a release, `task fw-installer -- fw-vX.Y.Z`
-   writes that release's manifest and pieces into `../personal-site/swingup/real/`; commit
-   and push the site.
+   writes that release's manifest and pieces into `../personal-site/controls/swingup/real/` (add
+   `--model <.ncpm>` to publish the model: the page's "Install model" button writes it to the `model`
+   partition over USB, and the same file is offered for download); commit and push the site.
 4. **Connect:** with no Wi-Fi credentials (or if the saved network is not found within
    15 s) the device opens an access point `cartpole-XXXX` (open); browse to
    `http://192.168.4.1/` and enter your 2.4 GHz network under Wi-Fi. The device tries it

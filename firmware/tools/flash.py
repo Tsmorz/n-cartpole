@@ -31,8 +31,8 @@ def _size(text: str) -> int:
     return int(text.rstrip("kKmM"), 0) * scale
 
 
-def nvs_range(partitions: Path = PARTITIONS) -> tuple[int, int]:
-    """Return (offset, end) of the nvs partition."""
+def partition(name: str, partitions: Path = PARTITIONS) -> tuple[int, int]:
+    """Return (offset, size) of the named partition."""
     lines = [
         ln
         for ln in partitions.read_text().splitlines()
@@ -40,10 +40,15 @@ def nvs_range(partitions: Path = PARTITIONS) -> tuple[int, int]:
     ]
     for row in csv.reader(lines):
         cells = [c.strip() for c in row]
-        if cells[0] == "nvs":
-            offset = int(cells[3], 0)
-            return offset, offset + _size(cells[4])
-    raise SystemExit(f"no nvs partition in {partitions}")
+        if cells[0] == name:
+            return int(cells[3], 0), _size(cells[4])
+    raise SystemExit(f"no {name} partition in {partitions}")
+
+
+def nvs_range(partitions: Path = PARTITIONS) -> tuple[int, int]:
+    """Return (offset, end) of the nvs partition."""
+    offset, size = partition("nvs", partitions)
+    return offset, offset + size
 
 
 def split_around(image: bytes, start: int, end: int) -> list[tuple[int, bytes]]:

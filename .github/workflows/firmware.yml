@@ -4,7 +4,7 @@ name: Firmware
 # and publishes a GitHub release for fw-v* tags (task fw-release -- fw-v0.2.0).
 # Release assets: n-cartpole-fw-<ver>.bin (OTA), n-cartpole-fw-<ver>-factory.bin
 # (USB flash at 0x0) and SHA256SUMS. Models are not part of a firmware release.
-# The browser installer (https://tsmorz.github.io/swingup/real) is fed from a release by
+# The browser installer (https://tsmorz.github.io/controls/swingup/real) is fed from a release by
 # `task fw-installer -- fw-vX.Y.Z`, which writes into the personal-site repo.
 
 on:
