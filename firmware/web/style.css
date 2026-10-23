@@ -694,7 +694,7 @@ code.copy.copied::after {
   .sim-stack > .sim-cell:last-child { order: 3; height: 300px; }
   .cards { grid-template-columns: minmax(0, 1fr); }
   .card-split { grid-template-columns: minmax(0, 1fr); }
-  .su-net { min-width: 820px; height: 270px; aspect-ratio: auto; max-height: none; }
+  .su-net { min-width: 940px; height: 300px; aspect-ratio: auto; max-height: none; }
   .su-net-hint { display: block; }
   .site-header { background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .head-facts { display: none; }

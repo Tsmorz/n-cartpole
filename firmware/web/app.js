@@ -1635,13 +1635,16 @@
     var h = S.hdr, tr = S.policy.trace, B = h.n_blocks, D = h.obs_dim, L = S.layout;
     function dims(nu) { var cols = Math.ceil(Math.sqrt(nu)); return { cols: cols, rows: Math.ceil(nu / cols) }; }
     var dh = dims(h.hidden), du = dims(h.hidden * h.expand);
-    var cellH = Math.max(3, Math.min(6, Math.floor(100 / dh.cols))), cellU = Math.max(2, Math.min(4, Math.floor(132 / du.cols)));
+    // On a phone the canvas is ~940 px wide inside a sideways-scrolling box, so the whole diagram is only
+    // ~1x: draw the neuron grids bigger there (the labels are fine as they are).
+    var phone = !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches);
+    var cellH = Math.max(3, Math.min(phone ? 10 : 6, Math.floor((phone ? 150 : 100) / dh.cols))), cellU = Math.max(2, Math.min(phone ? 7 : 4, Math.floor((phone ? 196 : 132) / du.cols)));
     var hs = dh.cols * cellH, hsy = dh.rows * cellH, usx = du.cols * cellU, usy = du.rows * cellU;
-    var gap = 40, rowH = Math.min(22, 236 / D), ix = 10, iy = 24;
-    var x0 = 162, DW = x0 + hs + B * (gap + usx + gap + hs) + gap + 175, DH = Math.max(300, iy + D * rowH + 44);
+    var gap = 40, rowH = Math.min(22, 236 / D), ix = 2, iy = 24;
+    var x0 = 154, DW = x0 + hs + B * (gap + usx + gap + hs) + gap + 175, DH = Math.max(300, iy + D * rowH + 44);
     var sc = Math.min(W / DW, H / DH);
     ctx.save();
-    ctx.translate((W - DW * sc) / 2, (H - DH * sc) / 2);
+    ctx.translate(phone ? 4 : (W - DW * sc) / 2, (H - DH * sc) / 2);   // phone: any slack goes to the right, not the left
     ctx.scale(sc, sc);
     var gridY = Math.max(70, (DH - hsy) / 2 - 20);
     function grid(vals, bx, by, d, cell, signed, label, sub) {
