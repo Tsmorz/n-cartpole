@@ -76,7 +76,7 @@ def test_numpy_bundle_is_a_drop_in(ckpt: Path) -> None:
     nb = numpy_bundle(bundle, t)
     obs = np.random.default_rng(2).normal(size=(20, bundle.obs_dim)).astype(np.float32)
     np.testing.assert_allclose(
-        nb.select_action(nb.normalize(torch.from_numpy(obs))),
+        nb.select_action(nb.normalize(obs)),
         bundle.select_action(bundle.normalize(obs)),
         atol=1e-4,
     )
