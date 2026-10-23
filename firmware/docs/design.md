@@ -109,6 +109,24 @@ Backends (Kconfig `NCP_BACKEND_SIM` / `NCP_BACKEND_RIG`, default sim):
   command to a FOC driver, an active-high e-stop sense input. Pins, signs, counts/rev,
   pulley radius and PWM full-scale force are Kconfig options.
 
+Status LED (`led.c`, Kconfig `NCP_LED_GPIO`, default 48; 38 on a DevKitC-1 v1.1; -1 = none):
+the board's WS2812 shows the state without a dashboard, highest priority first.
+
+| colour | meaning |
+|---|---|
+| amber, fast blink | writing flash (MAINT: firmware or model upload, settings): do not unplug |
+| red, blinking | fault: disarm to clear |
+| green, solid / breathing | armed, AI: settled at the goal / on the way |
+| cyan, solid | armed, manual |
+| red blip every second | a recording is running (over any of the above) |
+| amber, solid | no model: upload one |
+| purple, slow blink | setup access point: join `cartpole-XXXX` to set the Wi-Fi |
+| blue, slow blink / solid | joining the Wi-Fi network / booting |
+| white, short blip every 3 s | idle and connected, ready to arm |
+
+The tlm task updates it at 25 Hz on core 0 (RMT, 24 bits per change); brightness is capped
+at 40/255.
+
 ## HTTP / WebSocket API (port 80; also `http://<hostname>.local`)
 
 All JSON responses carry `Content-Type: application/json`. Errors: HTTP 4xx/5xx with

@@ -132,6 +132,12 @@ on behalf of core 1). Details: [docs/design.md](docs/design.md#cores-and-tasks).
 
 ## Troubleshooting
 
+- **The board's RGB LED** is a status light (table in `docs/design.md`, "Run states and
+  modes"): purple blinking = setup access point, blue blinking = joining Wi-Fi, white blip
+  = idle and ready, green = armed, red blinking = fault, amber blinking = writing flash (do
+  not unplug). Dark: the LED is on another pin (menuconfig: n-cartpole -> Status LED GPIO,
+  38 on a DevKitC-1 v1.1).
+
 - **Dashboard says "no model":** upload an `.ncpm`; `/api/info` → `model_error` says why
   a stored one was rejected (CRC, version, shape).
 - **Cannot find the device:** watch the serial console (`task fw-monitor`) for the IP;

@@ -16,6 +16,7 @@
 #include "freertos/idf_additions.h"
 #include "hal.h"
 #include "heap_watch.h"
+#include "led.h"
 #include "model_store.h"
 #include "net.h"
 #include "record.h"
@@ -424,6 +425,7 @@ static void tlm_task(void *arg) {
         }
 
         int64_t now = esp_timer_get_time();
+        led_update(now);
         if (now >= next_status) {
             next_status = now + STATUS_PERIOD_MS * 1000LL;
             ctrl_status_t st;

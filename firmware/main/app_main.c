@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "hal.h"
 #include "heap_watch.h"
+#include "led.h"
 #include "model_store.h"
 #include "net.h"
 #include "ota.h"
@@ -42,6 +43,7 @@ static void start_clock(void) {
 
 void app_main(void) {
     heap_watch_init(); /* first: count every failed allocation from here on */
+    led_init();        /* blue: booting */
     const esp_app_desc_t *app = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
     ESP_LOGI(TAG, "%s %s (IDF %s), backend %s, running from %s (%s)", app->project_name,
