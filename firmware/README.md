@@ -30,7 +30,8 @@ N16R8). **Framework:** ESP-IDF v5.3.1.
    `controls/swingup/real/index.md` in the personal site). It flashes the same image in two pieces around NVS,
    so the saved Wi-Fi network survives. After tagging a release, `task fw-installer -- fw-vX.Y.Z`
    writes that release's manifest and pieces into `../personal-site/controls/swingup/real/` (add
-   `--model <.ncpm>` to publish the model the page links for download); commit and push the site.
+   `--model <.ncpm>` to publish the model: the page's "Install model" button writes it to the `model`
+   partition over USB, and the same file is offered for download); commit and push the site.
 4. **Connect:** with no Wi-Fi credentials (or if the saved network is not found within
    15 s) the device opens an access point `cartpole-XXXX` (open); browse to
    `http://192.168.4.1/` and enter your 2.4 GHz network under Wi-Fi. The device tries it

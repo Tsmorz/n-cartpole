@@ -13,7 +13,9 @@ origin (release downloads send no CORS headers, so the files must live with the 
     task fw-installer -- --model dist/firmware/<name>-i8.ncpm             # only swap the model
 
 The model is not part of a release (the firmware and the model are separate files), so `--model` copies an
-exported `.ncpm` next to the page as `MODEL_NAME`, which the page links for download. What the page shows
+exported `.ncpm` next to the page as `MODEL_NAME`, plus `MODEL_MANIFEST`, which makes it a second
+esp-web-tools install: the page's "Install model" button writes the blob into the `model` partition over USB.
+The same file is linked for download (for the dashboard's drag and drop). What the page shows
 about the firmware and the model (version, model label, size) lives under the manifest's `n_cartpole` key,
 which esp-web-tools ignores.
 """
@@ -29,6 +31,7 @@ from pathlib import Path
 
 REPO = "Tsmorz/n-cartpole"
 MODEL_NAME = "n-cartpole-model.ncpm"
+MODEL_MANIFEST = "manifest-model.json"
 DEFAULT_OUT = (
     Path(__file__).resolve().parents[3]
     / "personal-site"
@@ -79,7 +82,11 @@ def build(image: Path, version: str, out: Path) -> dict:
 
 
 def publish_model(model: Path, out: Path) -> dict:
-    """Copy the `.ncpm` into `out` as MODEL_NAME and record what it is in the manifest; return that record."""
+    """Publish the model next to the page; return its record.
+
+    Copies the `.ncpm` into `out` as MODEL_NAME, records what it is in the manifest and writes the model's own
+    installer manifest (the blob goes to the start of the `model` partition, as `task fw-flash-model` does).
+    """
     from n_cartpole.deploy.firmware_blob import DTYPE_NAMES, read_header
 
     blob = model.read_bytes()
@@ -99,6 +106,23 @@ def publish_model(model: Path, out: Path) -> dict:
     shutil.copyfile(model, out / MODEL_NAME)
     manifest["n_cartpole"] = {**manifest.get("n_cartpole", {}), "model": info}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    offset, size = flash.partition("model")
+    if len(blob) > size:
+        raise SystemExit(
+            f"model is {len(blob)} bytes, the model partition holds {size}"
+        )
+    model_manifest = {
+        "name": "n-cartpole model",
+        "version": info["label"],
+        "new_install_prompt_erase": False,
+        "builds": [
+            {
+                "chipFamily": "ESP32-S3",
+                "parts": [{"path": MODEL_NAME, "offset": offset}],
+            }
+        ],
+    }
+    (out / MODEL_MANIFEST).write_text(json.dumps(model_manifest, indent=2) + "\n")
     return info
 
 

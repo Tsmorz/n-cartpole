@@ -61,6 +61,16 @@ def test_model_is_published_and_survives_a_new_firmware(tmp_path: Path) -> None:
     info = web_install.publish_model(model, out)
     assert (out / web_install.MODEL_NAME).read_bytes() == model.read_bytes()
     assert info["label"] == read_header(model.read_bytes())["label"]
+    model_part = json.loads((out / web_install.MODEL_MANIFEST).read_text())["builds"][
+        0
+    ]["parts"]
+    assert model_part == [
+        {
+            "path": web_install.MODEL_NAME,
+            "offset": web_install.flash.partition("model")[0],
+        }
+    ]
+    assert model_part[0]["offset"] == 0x620000
     web_install.build(src, "0.0.2", out)
     kept = json.loads((out / "manifest.json").read_text())
     assert kept["version"] == "0.0.2" and kept["n_cartpole"]["model"] == info
