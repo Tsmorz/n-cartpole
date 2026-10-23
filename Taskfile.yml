@@ -135,15 +135,15 @@ tasks:
     cmds:
       - git tag {{.CLI_ARGS}} && git push origin {{.CLI_ARGS}}
 
+  fw-installer:
+    desc: "Write a firmware release's browser-installer files into ../personal-site/swingup/real/ (page: /swingup/real/); args: task fw-installer -- fw-v0.1.0"
+    cmds:
+      - uv run python firmware/tools/web_install.py {{.CLI_ARGS}}
+
   fw-download:
     desc: "Download a firmware release into dist/firmware/; args: task fw-download -- fw-v0.2.0"
     cmds:
       - gh release download {{.CLI_ARGS}} --repo Tsmorz/n-cartpole --pattern 'n-cartpole-fw-*' --pattern SHA256SUMS --dir dist/firmware --clobber
-
-  plot:
-    desc: "Render the interactive training dashboard from checkpoints/metrics.csv"
-    cmds:
-      - uv run python scripts/plot_returns.py {{.CLI_ARGS}}
 
   test:
     desc: Run the test suite with coverage

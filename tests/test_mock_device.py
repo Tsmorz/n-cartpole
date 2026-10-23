@@ -55,3 +55,19 @@ def test_strict_budget_refuses_to_arm_when_over_budget(ckpt: Path) -> None:
     """With --strict-budget the mock behaves like the firmware's 80 % arming gate."""
     dev = _rig(ckpt, strict_budget=True)
     assert "loop budget exceeded" in dev.check_cmd({"arm": True})  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("dtype", ["f32", "f16", "i8"])
+def test_mock_reads_every_blob_dtype(ckpt: Path, dtype: str) -> None:
+    """The mock validates and decodes each weight dtype exactly as firmware_blob does."""
+    import numpy as np
+
+    from n_cartpole.deploy import firmware_blob as fb
+
+    blob = fb.export_blob(ckpt, dtype=dtype)
+    h = mock_device.validate_blob(blob)
+    assert mock_device.weight_bytes(h) == fb.weight_bytes(h)
+    np.testing.assert_array_equal(
+        mock_device.decode_weights(blob, h), fb.read_weights(blob)
+    )
+    assert mock_device.model_info(h)["dtype"] == dtype

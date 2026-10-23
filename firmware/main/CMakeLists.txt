@@ -13,6 +13,8 @@ idf_component_register(
         "ota.c"
         "record.c"
         "events.c"
+        "heap_watch.c"
+        "led.c"
     INCLUDE_DIRS "."
     # The dashboard, served from the app image (symbols _binary_<name>_start/_end).
     EMBED_FILES
@@ -24,6 +26,7 @@ idf_component_register(
         esp_driver_gptimer
         esp_driver_pcnt
         esp_driver_ledc
+        esp_driver_rmt
         esp_driver_spi
         esp_driver_gpio
         esp_timer

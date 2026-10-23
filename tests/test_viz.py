@@ -1,8 +1,7 @@
-"""Tests for n_cartpole.viz: style helpers, animate, and plots."""
+"""Tests for n_cartpole.viz: style helpers and animate."""
 
 from __future__ import annotations
 
-import csv
 import math
 from pathlib import Path
 
@@ -11,9 +10,8 @@ import pytest
 
 import n_cartpole.viz  # noqa: F401 — triggers __init__ coverage
 from n_cartpole.env.dynamics import PhysicsParams
-from n_cartpole.viz import animate_episode, plot_training_curves
+from n_cartpole.viz import animate_episode
 from n_cartpole.viz.animate import _cart_shape, _joint_coords
-from n_cartpole.viz.plots import _smooth
 from n_cartpole.viz.style import base_layout, link_color, rgba, style_axes
 
 # ---------------------------------------------------------------------------
@@ -126,34 +124,6 @@ def test_cart_shape_centered() -> None:
 
 
 # ---------------------------------------------------------------------------
-# plots.py: _smooth
-# ---------------------------------------------------------------------------
-
-
-def test_smooth_short_array() -> None:
-    """_smooth returns the input unchanged when it is too short to smooth."""
-    y = np.array([1.0, 2.0, 3.0])
-    out = _smooth(y)
-    np.testing.assert_array_equal(out, y)
-
-
-def test_smooth_even_length() -> None:
-    """_smooth handles an even-length array without raising."""
-    y = np.arange(10.0)
-    out = _smooth(y, window=3)
-    assert len(out) == len(y)
-
-
-def test_smooth_longer_array() -> None:
-    """_smooth produces a finite output of the same length as the input."""
-    rng = np.random.default_rng(0)
-    y = rng.normal(size=50)
-    out = _smooth(y, window=5)
-    assert len(out) == len(y)
-    assert not np.any(np.isnan(out))
-
-
-# ---------------------------------------------------------------------------
 # animate_episode (full figure build, no browser/file I/O)
 # ---------------------------------------------------------------------------
 
@@ -209,74 +179,3 @@ def test_animate_episode_saves_html(tmp_path: Path) -> None:
     fig = animate_episode(states, save_path=save_path, open_browser=False)
     assert isinstance(fig, go.Figure)
     assert save_path.exists()
-
-
-# ---------------------------------------------------------------------------
-# plot_training_curves (full figure build)
-# ---------------------------------------------------------------------------
-
-
-def _write_metrics_csv(path: Path, n_rows: int = 30) -> None:
-    """Write a synthetic metrics CSV with all standard columns."""
-    cols = [
-        "iteration",
-        "mean_return",
-        "value_loss",
-        "policy_loss",
-        "entropy",
-        "approx_kl",
-        "clip_fraction",
-    ]
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
-        w.writeheader()
-        rng = np.random.default_rng(42)
-        for i in range(1, n_rows + 1):
-            w.writerow(
-                {
-                    "iteration": i,
-                    "mean_return": float(rng.uniform(-5, 5)),
-                    "value_loss": float(rng.uniform(0.01, 2.0)),
-                    "policy_loss": float(rng.uniform(-0.1, 0.1)),
-                    "entropy": float(rng.uniform(0.5, 2.0)),
-                    "approx_kl": float(rng.uniform(0.001, 0.05)),
-                    "clip_fraction": float(rng.uniform(0.0, 0.3)),
-                }
-            )
-
-
-def test_plot_training_curves_returns_figure(tmp_path: Path) -> None:
-    """plot_training_curves returns a Plotly Figure for a full metrics CSV."""
-    import plotly.graph_objects as go
-
-    csv_path = tmp_path / "metrics.csv"
-    _write_metrics_csv(csv_path)
-    fig = plot_training_curves(csv_path, open_browser=False)
-    assert isinstance(fig, go.Figure)
-
-
-def test_plot_training_curves_saves_html(tmp_path: Path) -> None:
-    """plot_training_curves writes an HTML file when save_path is given."""
-    csv_path = tmp_path / "metrics.csv"
-    _write_metrics_csv(csv_path)
-    save_path = tmp_path / "dash.html"
-    plot_training_curves(csv_path, save_path=save_path, open_browser=False)
-    assert save_path.exists()
-
-
-def test_plot_training_curves_no_plottable_columns(tmp_path: Path) -> None:
-    """plot_training_curves raises ValueError when no known columns are present."""
-    csv_path = tmp_path / "bad.csv"
-    csv_path.write_text("foo,bar\n1,2\n")
-    with pytest.raises(ValueError, match="No plottable columns"):
-        plot_training_curves(csv_path, open_browser=False)
-
-
-def test_plot_training_curves_minimal_csv(tmp_path: Path) -> None:
-    """plot_training_curves works with a single-column (mean_return) CSV."""
-    import plotly.graph_objects as go
-
-    csv_path = tmp_path / "minimal.csv"
-    csv_path.write_text("iteration,mean_return\n1,10.0\n2,12.0\n")
-    fig = plot_training_curves(csv_path, open_browser=False)
-    assert isinstance(fig, go.Figure)

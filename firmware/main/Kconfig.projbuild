@@ -36,6 +36,15 @@ menu "n-cartpole"
             One 128-byte sample per control tick: 120 s at 200 Hz is about 3 MB of PSRAM.
             The buffer is allocated when a recording starts and shrinks if PSRAM is short.
 
+    config NCP_LED_GPIO
+        int "Status LED (WS2812 RGB) GPIO; -1 = none"
+        range -1 48
+        default 48
+        help
+            The dev board's addressable RGB LED, driven as a status light (main/led.h has
+            the colours). GPIO48 on the ESP32-S3-DevKitC-1 v1.0 and most N16R8 boards,
+            GPIO38 on the DevKitC-1 v1.1.
+
     menu "Rig hardware"
         depends on NCP_BACKEND_RIG
 

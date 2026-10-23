@@ -183,7 +183,7 @@ static cJSON *model_info(const model_t *m) {
     cJSON_AddNumberToObject(o, "params", (double)m->n_weights);
     cJSON_AddNumberToObject(o, "bytes", (double)h->total_size);
     cJSON_AddStringToObject(o, "crc32", crc);
-    cJSON_AddStringToObject(o, "dtype", h->dtype == NCP_DTYPE_F16 ? "f16" : "f32");
+    cJSON_AddStringToObject(o, "dtype", ncp_dtype_name(h->dtype));
     cJSON_AddStringToObject(o, "weights_in", m->in_psram ? "psram" : "internal");
     cJSON_AddBoolToObject(o, "goal_conditioned", (h->flags & NCP_FLAG_GOAL) != 0);
     cJSON_AddStringToObject(o, "action_mode", (h->flags & NCP_FLAG_DELTA) ? "delta" : "absolute");
@@ -258,8 +258,8 @@ static esp_err_t info_get(httpd_req_t *req) {
 
 /* Replies go through PSRAM: internal RAM is tight next to the Wi-Fi buffers. */
 static char *reply_buf(size_t size) {
-    char *b = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    return b != NULL ? b : heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
 /* ---------- GET /api/status ---------- */
@@ -796,7 +796,9 @@ static void on_close(httpd_handle_t hd, int sockfd) {
 
 esp_err_t web_start(void) {
     for (int i = 0; i < WS_SLOTS; i++) {
-        s_slots[i].data = heap_caps_malloc(WS_SLOT_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        /* PSRAM like the replies: lwIP copies the payload into its own buffers on send. */
+        s_slots[i].data = heap_caps_malloc_prefer(WS_SLOT_SIZE, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (s_slots[i].data == NULL) {
             return ESP_ERR_NO_MEM;
         }

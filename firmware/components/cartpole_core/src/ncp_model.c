@@ -20,6 +20,15 @@ const char *ncp_err_str(ncp_err_t err) {
     return "unknown error";
 }
 
+const char *ncp_dtype_name(int dtype) {
+    switch (dtype) {
+    case NCP_DTYPE_F32: return "f32";
+    case NCP_DTYPE_F16: return "f16";
+    case NCP_DTYPE_I8: return "i8";
+    }
+    return "?";
+}
+
 /* CRC-32/IEEE, reflected polynomial 0xEDB88320, nibble table (64 bytes). */
 static const uint32_t crc_nibble[16] = {
     0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu, 0x76DC4190u, 0x6B6B51F4u,
@@ -55,8 +64,20 @@ size_t ncp_weight_count(const ncp_header_t *h) {
     return n;
 }
 
+static size_t pad4(size_t n) { return (n + 3u) & ~(size_t)3u; }
+
 size_t ncp_weight_bytes(const ncp_header_t *h) {
+    if (h->dtype == NCP_DTYPE_I8) {
+        const size_t H = h->hidden, E = (size_t)h->hidden * h->expand;
+        const size_t q = 2 * E * H;                     /* fc1 + fc2 weights per block */
+        const size_t per_block = 4 * (E + H) + 2 * pad4(E * H); /* scales + int8 rows */
+        return 4 * (ncp_weight_count(h) - (size_t)h->n_blocks * q) + (size_t)h->n_blocks * per_block;
+    }
     return ncp_weight_count(h) * (h->dtype == NCP_DTYPE_F16 ? 2u : 4u);
+}
+
+size_t ncp_weight_ram_bytes(const ncp_header_t *h) {
+    return h->dtype == NCP_DTYPE_I8 ? ncp_weight_bytes(h) : ncp_weight_count(h) * sizeof(float);
 }
 
 static int expected_obs_dim(const ncp_header_t *h) {
@@ -75,7 +96,8 @@ ncp_err_t ncp_header_parse(const uint8_t *buf, size_t len, ncp_header_t *out) {
     if (h.version < 1 || h.header_size != NCP_HEADER_SIZE) return NCP_E_UNSUPPORTED;
     if (h.flags & ~(uint8_t)(NCP_FLAG_GOAL | NCP_FLAG_DELTA | NCP_FLAG_EKF))
         return NCP_E_UNSUPPORTED;
-    if (h.dtype != NCP_DTYPE_F32 && h.dtype != NCP_DTYPE_F16) return NCP_E_UNSUPPORTED;
+    if (h.dtype != NCP_DTYPE_F32 && h.dtype != NCP_DTYPE_F16 && h.dtype != NCP_DTYPE_I8)
+        return NCP_E_UNSUPPORTED;
     if (h.n_links < 1 || h.n_links > NCP_MAX_LINKS) return NCP_E_SHAPE;
     if (h.n_blocks > NCP_MAX_BLOCKS || h.expand < 1 || h.hidden < 1) return NCP_E_SHAPE;
     if (h.action_history > NCP_MAX_HIST || h.delay_steps > NCP_MAX_DELAY) return NCP_E_SHAPE;
@@ -143,28 +165,56 @@ void ncp_weights_decode(const ncp_header_t *h, const uint8_t *src, float *dst, s
     }
 }
 
-ncp_err_t ncp_model_bind(ncp_model_t *m, const ncp_header_t *h, const float *weights) {
+void ncp_weights_load(const ncp_header_t *h, const uint8_t *src, size_t off, size_t n, void *ram) {
+    if (h->dtype == NCP_DTYPE_F16) {
+        ncp_weights_decode(h, src, (float *)ram + off / 2, n / 2);
+    } else {
+        memcpy((uint8_t *)ram + off, src, n); /* f32 and int8: the RAM image is the file */
+    }
+}
+
+/* One float32 tensor of n values at *p; advances *p. */
+static const float *take_f32(const uint8_t **p, size_t n) {
+    const float *t = (const float *)(const void *)*p;
+    *p += n * sizeof(float);
+    return t;
+}
+
+/* One matrix: float32 [rows x cols], or for int8 the row scales then the padded int8 rows. */
+static void take_matrix(const uint8_t **p, int i8, size_t rows, size_t cols, const float **w,
+                        const int8_t **q, const float **s) {
+    if (i8) {
+        *s = take_f32(p, rows);
+        *q = (const int8_t *)*p;
+        *p += pad4(rows * cols);
+    } else {
+        *w = take_f32(p, rows * cols);
+    }
+}
+
+ncp_err_t ncp_model_bind(ncp_model_t *m, const ncp_header_t *h, const void *weights) {
     if (h->n_blocks > NCP_MAX_BLOCKS) return NCP_E_SHAPE;
     memset(m, 0, sizeof *m);
     m->hdr = *h;
     const size_t H = h->hidden, D = h->obs_dim, E = (size_t)h->hidden * h->expand;
-    const float *p = weights;
-    m->in_w = p; p += H * D;
-    m->in_b = p; p += H;
+    const int i8 = h->dtype == NCP_DTYPE_I8;
+    const uint8_t *p = (const uint8_t *)weights;
+    m->in_w = take_f32(&p, H * D);
+    m->in_b = take_f32(&p, H);
     for (int b = 0; b < h->n_blocks; b++) {
         ncp_block_t *blk = &m->blocks[b];
-        blk->ln_w = p; p += H;
-        blk->ln_b = p; p += H;
-        blk->fc1_w = p; p += E * H;
-        blk->fc1_b = p; p += E;
-        blk->fc2_w = p; p += H * E;
-        blk->fc2_b = p; p += H;
+        blk->ln_w = take_f32(&p, H);
+        blk->ln_b = take_f32(&p, H);
+        take_matrix(&p, i8, E, H, &blk->fc1_w, &blk->fc1_q, &blk->fc1_s);
+        blk->fc1_b = take_f32(&p, E);
+        take_matrix(&p, i8, H, E, &blk->fc2_w, &blk->fc2_q, &blk->fc2_s);
+        blk->fc2_b = take_f32(&p, H);
     }
-    m->final_ln_w = p; p += H;
-    m->final_ln_b = p; p += H;
-    m->out_w = p; p += H;
-    m->out_b = p; p += 1;
-    return ((size_t)(p - weights) == ncp_weight_count(h)) ? NCP_OK : NCP_E_SIZE;
+    m->final_ln_w = take_f32(&p, H);
+    m->final_ln_b = take_f32(&p, H);
+    m->out_w = take_f32(&p, H);
+    m->out_b = take_f32(&p, 1);
+    return ((size_t)(p - (const uint8_t *)weights) == ncp_weight_ram_bytes(h)) ? NCP_OK : NCP_E_SIZE;
 }
 
 void ncp_goal_target(int n_links, int goal, double *target) {

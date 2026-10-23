@@ -26,6 +26,11 @@ N16R8). **Framework:** ESP-IDF v5.3.1.
    `factory.bin` yourself with `esptool write_flash 0x0` would erase NVS (the image pads it
    with 0xFF). Updating a board that is already set up is easier still: drag the app image onto
    the dashboard (OTA), or `esptool.py write_flash 0x20000 build/n_cartpole_fw.bin`.
+   **From the browser instead:** <https://tsmorz.github.io/swingup/real> (Chrome/Edge, Web Serial;
+   `swingup/real/index.md` in the personal site). It flashes the same image in two pieces around NVS,
+   so the saved Wi-Fi network survives. After tagging a release, `task fw-installer -- fw-vX.Y.Z`
+   writes that release's manifest and pieces into `../personal-site/swingup/real/`; commit
+   and push the site.
 4. **Connect:** with no Wi-Fi credentials (or if the saved network is not found within
    15 s) the device opens an access point `cartpole-XXXX` (open); browse to
    `http://192.168.4.1/` and enter your 2.4 GHz network under Wi-Fi. The device tries it
@@ -126,6 +131,12 @@ API, uploads, WebSocket) and `tlm` (prio 4: telemetry ~25 msg/s, status at 2 Hz,
 on behalf of core 1). Details: [docs/design.md](docs/design.md#cores-and-tasks).
 
 ## Troubleshooting
+
+- **The board's RGB LED** is a status light (table in `docs/design.md`, "Run states and
+  modes"): purple blinking = setup access point, blue blinking = joining Wi-Fi, white blip
+  = idle and ready, green = armed, red blinking = fault, amber blinking = writing flash (do
+  not unplug). Dark: the LED is on another pin (menuconfig: n-cartpole -> Status LED GPIO,
+  38 on a DevKitC-1 v1.1).
 
 - **Dashboard says "no model":** upload an `.ncpm`; `/api/info` → `model_error` says why
   a stored one was rejected (CRC, version, shape).

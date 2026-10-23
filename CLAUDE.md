@@ -21,12 +21,12 @@ task eval-transitions -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt 
 task train -- --config config/rig.toml --randomize            # buildable reference rig (rigid-body links, delay, randomized true plant, reward shaping)
 task play -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --start DD --goals "UU@0,DU@6,DD@12"
 task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt   # interactive HTML replay (auto link count)
-task plot -- --csv checkpoints/double/tqc/metrics.csv            # interactive training dashboard
-task policy-map -- --checkpoint checkpoints/double/tqc/tqc_latest.pt  # input→output force/value control-surface map
+task eval-swingup -- --checkpoint checkpoints/double/tqc/tqc_latest.pt --trials 10  # time swing-ups from randomized near-hanging starts
 task export-web                                 # swing-up actor → ../personal-site/assets/models/ (browser demo; see below)
 task distill -- --hidden 64 --blocks 2          # imitate a big policy with a small actor (DAgger) → <run>-h64b2/student.pt
 task train -- --resume <teacher latest> --actor-from <student.pt> --resume-lr 1e-4 --steps N   # RL fine-tune the student vs the teacher's critics
-task export-firmware -- --checkpoint <ckpt>     # actor + physics + sensor model → dist/firmware/*.ncpm (ESP32 model blob)
+task export-firmware -- --checkpoint <ckpt>     # actor + physics + sensor model → dist/firmware/*.ncpm (ESP32 model blob; --dtype i8 = int8 block matrices, ~1/4 the RAM)
+uv run python scripts/eval_quantized.py --checkpoint <ckpt> --weights i8   # transition test with the weights as the device runs them (torch | f32 | i8)
 task fw-mock                                    # the device dashboard against a simulated device (http://127.0.0.1:8080)
 task fw-build / fw-flash -- <port> / fw-release -- fw-v0.1.0   # firmware: local Docker build / USB flash / tag → CI release
 task fw-build-rig                               # the rig backend (sdkconfig.rig) → firmware/build-rig/ (CI compiles it on every firmware push)
@@ -39,7 +39,7 @@ task clean                                      # remove .venv, caches, checkpoi
 
 The only learner is **TQC** (`scripts/train.py`, `training/off_policy.py`, `policy/tqc.py`). PPO was removed; `load_policy()` rejects old PPO checkpoints with a clear error. `--links N` (`n_cartpole/env/factory.py` builds the env and its obs dim/mirror-sign) defaults to 2 (double).
 
-**Checkpoint naming and layout**: checkpoints live under `checkpoints/<single|double>/<tqc|tqc-goal>/`, chosen automatically from `--links`/`--goals` (override with `--checkpoint-dir`). Filenames are `tqc_latest.pt` and `tqc_NNNNNNN.pt`. Every checkpoint embeds its full `TQCConfig` (including `env.n_links`) plus an `"algo": "tqc"` key, so `policy/loader.py::load_policy()` and therefore `scripts/play.py` / `scripts/policy_map.py` reconstruct the right network shape (`n_cartpole/env/factory.py::env_spec()`) from the checkpoint alone — replay and the policy map work for any checkpoint regardless of which folder it's opened from. `policy/tqc.py`'s `SquashedGaussianActor`/`QuantileCritic` take an `obs_dim` override for this (default 8, for backward compatibility with pre-existing double-link checkpoints and `tests/test_tqc.py`).
+**Checkpoint naming and layout**: checkpoints live under `checkpoints/<single|double>/<tqc|tqc-goal>/`, chosen automatically from `--links`/`--goals` (override with `--checkpoint-dir`). Filenames are `tqc_latest.pt` and `tqc_NNNNNNN.pt`. Every checkpoint embeds its full `TQCConfig` (including `env.n_links`) plus an `"algo": "tqc"` key, so `policy/loader.py::load_policy()` and therefore `scripts/play.py` reconstructs the right network shape (`n_cartpole/env/factory.py::env_spec()`) from the checkpoint alone — replay works for any checkpoint regardless of which folder it's opened from. `policy/tqc.py`'s `SquashedGaussianActor`/`QuantileCritic` take an `obs_dim` override for this (default 8, for backward compatibility with pre-existing double-link checkpoints and `tests/test_tqc.py`).
 
 **Publishing checkpoints**: `checkpoints/` is gitignored — never commit `.pt` files, and nothing trains in CI (no GitHub Actions workflow does model training; `ci.yml` only runs lint/tests). Pretrained models are distributed via GitHub Releases, built entirely locally via Taskfile targets: `task package-models` zips whatever exists under `checkpoints/<single|double>/<tqc|tqc-goal>/` into `dist/{single,double}-{tqc,tqc-goal}.zip` (skipping combinations that haven't been trained — see the guard in `Taskfile.yml`), and `task release-models -- <tag>` runs that, then `git tag`/`git push`, then `gh release create <tag> dist/*.zip --generate-notes` (requires the `gh` CLI, authenticated). `task download-models [-- <tag>]` reverses it: `gh release download` + unzip back into `checkpoints/`. If you change the checkpoint directory convention (`scripts/train.py`'s `--checkpoint-dir` default), update `package-models`'s `for links in single double; for algo in tqc tqc-goal` loop in `Taskfile.yml` to match.
 
@@ -75,13 +75,9 @@ n_cartpole/
   viz/
     style.py            — shared Plotly palette (validated, CVD-safe) + layout template
     animate.py          — animate_episode(): interactive HTML replay + telemetry sidebar
-    plots.py            — plot_training_curves(): interactive training dashboard from metrics.csv
-    policy_map.py       — plot_policy_map(): input→output force/value contour phase-portrait
 scripts/
   train.py              — TQC CLI: argparse → TQCTrainer.train()
   play.py               — load checkpoint → interactive HTML replay
-  plot_returns.py       — metrics.csv/returns.csv → interactive training dashboard (task plot)
-  policy_map.py         — checkpoint → input→output control-surface map (task policy-map)
   eval_transitions.py   — goal-conditioned checkpoint → start×goal success matrix + speed/steadiness/effort matrices (task eval-transitions)
 config/
   default.toml          — point-mass defaults

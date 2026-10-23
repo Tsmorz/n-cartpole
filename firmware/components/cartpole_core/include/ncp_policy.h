@@ -1,4 +1,5 @@
-/* ncp_policy.h — the SimBa actor's deterministic forward pass, float32.
+/* ncp_policy.h — the SimBa actor's deterministic forward pass, float32 activations (int8 or
+ * float32 block matrices, see ncp_model.h).
  *
  * in_proj -> blocks x [h += fc2(relu(fc1(LayerNorm(h))))] -> LayerNorm -> mean;
  * force = tanh(mean) * force_max  (n_cartpole/policy/simba.py, tqc.py). The

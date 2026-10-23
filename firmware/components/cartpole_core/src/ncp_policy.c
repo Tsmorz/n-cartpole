@@ -1,4 +1,5 @@
-/* ncp_policy.c — SimBa actor forward pass (deterministic mean head), float32. */
+/* ncp_policy.c — SimBa actor forward pass (deterministic mean head), float32 activations;
+ * the block matrices are float32 or int8 with a scale per row. */
 #include "ncp_policy.h"
 
 #include <math.h>
@@ -31,6 +32,26 @@ static inline float dot(const float *w, const float *x, size_t n) {
     return (s0 + s1) + (s2 + s3);
 }
 
+/* The same with int8 weights; the caller multiplies by the row's scale. */
+static inline float dot_q(const int8_t *w, const float *x, size_t n) {
+    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        s0 += (float)w[i] * x[i];
+        s1 += (float)w[i + 1] * x[i + 1];
+        s2 += (float)w[i + 2] * x[i + 2];
+        s3 += (float)w[i + 3] * x[i + 3];
+    }
+    for (; i < n; i++) s0 += (float)w[i] * x[i];
+    return (s0 + s1) + (s2 + s3);
+}
+
+/* Row o of a block matrix (float32 or int8) dotted with x. */
+static inline float row_dot(const float *w, const int8_t *q, const float *s, size_t o,
+                            const float *x, size_t n) {
+    return q != NULL ? s[o] * dot_q(q + o * n, x, n) : dot(w + o * n, x, n);
+}
+
 /* out[o] = b[o] + W[o] . x, W row-major [out][in]. */
 static void linear(const float *W, const float *b, const float *x, size_t in, size_t out_n,
                    float *out) {
@@ -60,10 +81,12 @@ float ncp_policy_act(ncp_policy_t *p, const float *obs) {
     for (int bi = 0; bi < m->hdr.n_blocks; bi++) {
         const ncp_block_t *blk = &m->blocks[bi];
         layer_norm(h, blk->ln_w, blk->ln_b, H, t);
-        linear(blk->fc1_w, blk->fc1_b, t, H, E, u);
-        for (size_t i = 0; i < E; i++)
-            if (u[i] < 0.0f) u[i] = 0.0f;
-        for (size_t o = 0; o < H; o++) h[o] += blk->fc2_b[o] + dot(blk->fc2_w + o * E, u, E);
+        for (size_t o = 0; o < E; o++) {
+            float v = blk->fc1_b[o] + row_dot(blk->fc1_w, blk->fc1_q, blk->fc1_s, o, t, H);
+            u[o] = v > 0.0f ? v : 0.0f;
+        }
+        for (size_t o = 0; o < H; o++)
+            h[o] += blk->fc2_b[o] + row_dot(blk->fc2_w, blk->fc2_q, blk->fc2_s, o, u, E);
     }
     layer_norm(h, m->final_ln_w, m->final_ln_b, H, t);
     p->mean = m->out_b[0] + dot(m->out_w, t, H);

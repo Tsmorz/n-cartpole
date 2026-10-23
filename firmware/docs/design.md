@@ -32,8 +32,13 @@ scripts/export_firmware.py           CLI: task export-firmware
 
 Specified byte-for-byte in `components/cartpole_core/include/ncp_model.h`: a
 512-byte header (dims, flags, actuator limits, nominal physics, sensor/EKF
-parameters, label) followed by float32 (or float16) weights in forward order with the
-RunningNorm folded into `in_w/in_b`. The device stores it in its own `model` flash
+parameters, label) followed by the weights in forward order with the RunningNorm folded
+into `in_w/in_b`, as float32, float16 or int8 (`task export-firmware -- --dtype i8`).
+float32 and float16 are decoded to float32 in RAM. int8 quantizes only the residual
+blocks' `fc1`/`fc2` matrices (~96% of the parameters), with one float32 scale per row,
+and the device keeps that image as it is, so the matrices take a quarter of the RAM.
+Activations stay float32 (`n_cartpole/deploy/quantize.py` has the NumPy twin of
+`ncp_policy_act`). The device stores it in its own `model` flash
 partition, independent of the firmware image, so firmware and models are updated
 separately (and a firmware release never contains a model: checkpoints are not in git).
 
@@ -103,6 +108,24 @@ Backends (Kconfig `NCP_BACKEND_SIM` / `NCP_BACKEND_RIG`, default sim):
   quadrature encoder on the motor (PCNT, ×4) for the cart, a PWM + DIR + EN torque
   command to a FOC driver, an active-high e-stop sense input. Pins, signs, counts/rev,
   pulley radius and PWM full-scale force are Kconfig options.
+
+Status LED (`led.c`, Kconfig `NCP_LED_GPIO`, default 48; 38 on a DevKitC-1 v1.1; -1 = none):
+the board's WS2812 shows the state without a dashboard, highest priority first.
+
+| colour | meaning |
+|---|---|
+| amber, fast blink | writing flash (MAINT: firmware or model upload, settings): do not unplug |
+| red, blinking | fault: disarm to clear |
+| green, solid / breathing | armed, AI: settled at the goal / on the way |
+| cyan, solid | armed, manual |
+| red blip every second | a recording is running (over any of the above) |
+| amber, solid | no model: upload one |
+| purple, slow blink | setup access point: join `cartpole-XXXX` to set the Wi-Fi |
+| blue, slow blink / solid | joining the Wi-Fi network / booting |
+| white, short blip every 3 s | idle and connected, ready to arm |
+
+The tlm task updates it at 25 Hz on core 0 (RMT, 24 bits per change); brightness is capped
+at 40/255.
 
 ## HTTP / WebSocket API (port 80; also `http://<hostname>.local`)
 
@@ -175,7 +198,7 @@ Commands (`POST /api/cmd`, one key per request):
   "model": null | {
     "label": "...", "step": 2000000, "n_links": 2, "obs_dim": 12, "hidden": 256,
     "blocks": 2, "expand": 4, "params": 1056258, "bytes": 4225548, "crc32": "1a2b3c4d",
-    "dtype": "f32", "weights_in": "psram" | "internal",
+    "dtype": "f32" | "f16" | "i8", "weights_in": "psram" | "internal",
     "goal_conditioned": true, "action_mode": "delta", "estimator": "ekf",
     "action_history": 2, "delay_steps": 1, "dt": 0.005, "force_max": 15.35,
     "force_slew": 300.0, "x_lim": 0.5, "goals": ["UU", "DU", "UD", "DD"]
@@ -198,7 +221,8 @@ Status (WS text message and `/api/status`):
   "loop": {"period_us": 5000, "exec_avg_us": 900, "exec_max_us": 1400,
            "policy_avg_us": 600, "est_avg_us": 200, "misses": 0, "rt_factor": 1.0,
            "budget_ok": true},
-  "heap": {"internal_free": 180000, "internal_min": 150000, "psram_free": 3800000},
+  "heap": {"internal_free": 180000, "internal_min": 150000, "psram_free": 3800000,
+           "internal_largest": 110592, "alloc_failed": 0},   // largest free internal block; failed allocations since boot
   "wifi": {"mode": "sta" | "ap", "ssid": "...", "ip": "192.168.1.40", "rssi": -52,
            "join": {"state": "idle" | "connecting" | "ok" | "failed", "ssid": "...", "ip": "...", "error": "..."}},
   "uptime_s": 1234, "boot": 42, "events_seq": 17, "unix": 1792700000,   // unix only once the clock is set
@@ -273,8 +297,11 @@ tick; streamed from PSRAM (octal, 80 MHz, ~75 MB/s) the same net takes ~2.1-2.4 
 core 0 competes for that bandwidth. `sdkconfig.defaults` therefore:
 
 - puts Wi-Fi/lwIP dynamic allocations in PSRAM (`SPIRAM_TRY_ALLOCATE_WIFI_LWIP`), makes the Wi-Fi TX and
-  management buffers dynamic, trims the static RX/TX pools and pins the block-ack window to 6
-  (the Wi-Fi config check needs `RX_BA_WIN <= 2 * STATIC_RX_BUFFER_NUM`);
+  management buffers dynamic, trims the static RX/TX and management pools and pins the block-ack
+  window to 4 (the Wi-Fi config check needs `RX_BA_WIN <= 2 * STATIC_RX_BUFFER_NUM`). The static
+  RX buffers stay in internal RAM even with the PSRAM option: 6 -> 4 of them (plus 5 -> 3 RX
+  management buffers, 32 -> 16 management short buffers) gave 3.1 KB, and model uploads still
+  run at ~140 KB/s (the flash write, not Wi-Fi, sets the pace);
 - drops the IRAM-resident Wi-Fi fast paths (they come out of the same SRAM pool as the heap);
 - sets the data cache to 32 KB (the other 32 KB become heap; with the weights in internal RAM the
   PSRAM traffic the cache absorbs is small).
@@ -288,6 +315,40 @@ A model too large for the margin (e.g. an h64x2 f32 actor, ~270 KB) falls back t
 ~3x slower per tick; `weights_in` in `/api/info` says which. Per tick (rig-relevant): policy 0.76 ms
 + EKF 0.5 ms (single-precision EKF, see `ncp_ekf.h`); the sim backend adds ~2.3 ms of
 double-precision plant integration that the rig does not have.
+
+The telemetry buffers (three 6 KB WebSocket send slots, the 6 KB status text and its copy, the
+3.7 KB frame message) live in PSRAM with an internal fallback, as the HTTP replies do. Measured on
+the board (sim backend, h48x2 student, weights internal), 40 s after boot and unchanged by two
+WebSocket clients, a page load and a model download:
+
+| build | free | low | largest block | policy |
+|---|---|---|---|---|
+| 644e764, f32 weights | 37.4 KB | 21.6 KB | - | 0.75 ms |
+| telemetry buffers in PSRAM, f32 | 71.0 KB | 54.1 KB | 24 KB | 0.77 ms |
+| + Wi-Fi pools trimmed, f32 | 74.1 KB | 57.3 KB | 26 KB | 0.77 ms |
+| + Wi-Fi pools trimmed, int8 | 180.2 KB | 164.7 KB | 74 KB | 1.09-1.13 ms |
+
+The largest free block stays small with f32 weights: internal RAM is fragmented, which is why
+`model_store.c` keeps the weights buffer. Swapping from an int8 model to an f32 one without a
+reboot therefore lands the f32 weights in PSRAM (the kept 44 KB buffer is too small and no
+150 KB block is left); a reboot loads them internal again.
+
+**int8 weights** (`--dtype i8`) shrink the h48x2 student from 150 KB to 44 KB of RAM. In the
+Python simulation (`scripts/eval_quantized.py`, 20 trials per start x goal pair on the checkpoint's
+randomized plant, the same seeds for both) the int8 actor reached 92% / 86% of the transitions on
+two seed sets against 91% / 85% for float32, with 15 off-rail trials against 18 and the same time
+to settle and hold force, although its force is 0.6 N from the float force on average along its
+own trajectories (p99 2.9 N): the policy tolerates it like sensor noise. On the chip (sim
+backend) it settled 10 of 10 goal changes in a UU/DU/UD/DD sequence, median 2.3 s against 2.4 s
+for f32. The int8 dot product costs ~1.7x the instructions of float32 (l8ui + sext + float.s per
+weight): 1.1 ms per inference instead of 0.77 ms, well inside the rig's 5 ms tick.
+
+**Where it goes** (`heap_watch.c`): a failed-allocation callback counts failures (status
+`heap.alloc_failed`, the last one's size, heap and caller in the event log), and the event log
+gets "internal RAM after start" 30 s after boot plus a "new low" entry each time the
+lowest-since-boot falls another 2 KB, so the entries around it say what pushed memory down.
+Status `heap.internal_largest` is the largest free internal block (what a single allocation, such
+as a reloaded model, can still get).
 
 mDNS: after the station connects the device creates an IPv6 link-local address so the responder
 answers AAAA as well as A; without it macOS waits out a 5 s timeout for the AAAA answer

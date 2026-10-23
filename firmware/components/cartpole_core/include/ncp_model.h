@@ -9,12 +9,17 @@
  * network in the browser for the activation diagram.
  *
  * Layout (little-endian): a 512-byte ncp_header_t, then the weights as
- * float32 (dtype 0) or IEEE float16 (dtype 1), tensors back to back in this
- * order (H = hidden, E = hidden * expand, D = obs_dim):
+ * float32 (dtype 0), IEEE float16 (dtype 1) or int8 (dtype 2), tensors back to
+ * back in this order (H = hidden, E = hidden * expand, D = obs_dim):
  *   in_w [H x D], in_b [H],
  *   per block b: ln_w [H], ln_b [H], fc1_w [E x H], fc1_b [E], fc2_w [H x E], fc2_b [H],
  *   final_ln_w [H], final_ln_b [H], out_w [H], out_b [1].
  * Matrices are row-major [out][in], as in torch.nn.Linear.weight.
+ * int8 (n_cartpole/deploy/quantize.py): only fc1_w and fc2_w are quantized, each
+ * stored as float32 scale [rows], then int8 q [rows x cols], then zero bytes up to a
+ * multiple of 4; w = q * scale[row]. Every other tensor stays float32. The device
+ * keeps this image as it is (1 byte per matrix weight in RAM); f32 and f16 are
+ * decoded to float32.
  * crc32 is CRC-32/IEEE (zlib.crc32) of the whole file with the crc32 field
  * itself read as zero.
  *
@@ -42,7 +47,7 @@ extern "C" {
 /* kinematics (2 + 3n) + goal (n) + action history */
 #define NCP_MAX_OBS (2 + 3 * NCP_MAX_LINKS + NCP_MAX_LINKS + NCP_MAX_HIST)
 
-enum { NCP_DTYPE_F32 = 0, NCP_DTYPE_F16 = 1 };
+enum { NCP_DTYPE_F32 = 0, NCP_DTYPE_F16 = 1, NCP_DTYPE_I8 = 2 };
 
 enum {
     NCP_FLAG_GOAL = 1u << 0,  /* goal-conditioned: cos(target) per link after the kinematics */
@@ -89,9 +94,12 @@ typedef enum {
     NCP_E_UNSUPPORTED, /* valid but needs a feature this firmware lacks */
 } ncp_err_t;
 
-/* Pointers to each tensor inside one float32 array (owned by the caller). */
+/* Pointers to each tensor inside the weight image (owned by the caller). An int8 model
+ * has fc1_w/fc2_w NULL and fc1_q/fc1_s, fc2_q/fc2_s (int8 rows, float32 row scales) set. */
 typedef struct {
     const float *ln_w, *ln_b, *fc1_w, *fc1_b, *fc2_w, *fc2_b;
+    const int8_t *fc1_q, *fc2_q;
+    const float *fc1_s, *fc2_s;
 } ncp_block_t;
 
 #define NCP_MAX_BLOCKS 4
@@ -104,6 +112,9 @@ typedef struct {
 } ncp_model_t;
 
 const char *ncp_err_str(ncp_err_t err);
+
+/* "f32", "f16", "i8" ("?" for anything else). */
+const char *ncp_dtype_name(int dtype);
 
 /* Streaming CRC-32/IEEE (zlib.crc32): crc = ncp_crc32(0, a, na); crc = ncp_crc32(crc, b, nb); */
 uint32_t ncp_crc32(uint32_t crc, const void *data, size_t len);
@@ -118,17 +129,26 @@ ncp_err_t ncp_header_parse(const uint8_t *buf, size_t len, ncp_header_t *out);
 /* Header + CRC over a complete in-memory blob of `len` bytes. */
 ncp_err_t ncp_blob_validate(const uint8_t *blob, size_t len, ncp_header_t *out);
 
-/* Number of float weights after the header (in_w .. out_b). */
+/* Number of weights (parameters) after the header (in_w .. out_b). */
 size_t ncp_weight_count(const ncp_header_t *h);
 
-/* Bytes the weights take in the file (count * 4 or * 2). */
+/* Bytes the weights take in the file (count * 4 or * 2; int8: see the layout above). */
 size_t ncp_weight_bytes(const ncp_header_t *h);
 
-/* Decode `count` weights from the file's dtype into float32. */
+/* Bytes of the in-RAM weight image ncp_model_bind takes: count * 4 for f32 and f16 (decoded),
+ * the file bytes for int8 (kept as is). */
+size_t ncp_weight_ram_bytes(const ncp_header_t *h);
+
+/* Decode `count` weights from an f32 or f16 file into float32. */
 void ncp_weights_decode(const ncp_header_t *h, const uint8_t *src, float *dst, size_t count);
 
-/* Point m's tensors into `weights` (ncp_weight_count floats, already decoded). */
-ncp_err_t ncp_model_bind(ncp_model_t *m, const ncp_header_t *h, const float *weights);
+/* Load `n` file weight bytes that start `off` bytes into the weights (off and n multiples of 4,
+ * the last chunk may end at ncp_weight_bytes) into their place in the RAM image `ram`
+ * (ncp_weight_ram_bytes). Any dtype; lets a loader stream the file in chunks. */
+void ncp_weights_load(const ncp_header_t *h, const uint8_t *src, size_t off, size_t n, void *ram);
+
+/* Point m's tensors into the RAM image `weights` (ncp_weight_ram_bytes, 4-byte aligned). */
+ncp_err_t ncp_model_bind(ncp_model_t *m, const ncp_header_t *h, const void *weights);
 
 /* Target angles of goal `goal` (bit k set: link k down, pi; else up, 0) —
  * n_cartpole.env.goals.goal_configs. Labels: 'U'/'D' per link, base link first. */
