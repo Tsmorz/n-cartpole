@@ -35,10 +35,11 @@ def test_manifest_parts_skip_nvs_and_reassemble_the_image(tmp_path: Path) -> Non
     assert bytes(chip[:start]) == image[:start] and bytes(chip[end:]) == image[end:]
 
 
-def test_page_points_at_the_manifest(tmp_path: Path) -> None:
-    """The page loads esp-web-tools and the manifest next to it."""
+def test_new_release_replaces_old_pieces(tmp_path: Path) -> None:
+    """Pieces of an earlier version are removed so the site does not accumulate images."""
     src = tmp_path / "factory.bin"
     src.write_bytes(b"\x01" * 100)
-    web_install.build(src, "0.0.1", tmp_path / "site")
-    html = (tmp_path / "site" / "index.html").read_text()
-    assert 'manifest="manifest.json"' in html and "esp-web-tools" in html
+    out = tmp_path / "site"
+    web_install.build(src, "0.0.1", out)
+    web_install.build(src, "0.0.2", out)
+    assert sorted(p.name for p in out.glob("*.bin")) == ["n-cartpole-fw-0.0.2-0.bin"]
