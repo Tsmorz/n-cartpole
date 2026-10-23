@@ -1638,7 +1638,7 @@
     var cellH = Math.max(3, Math.min(6, Math.floor(100 / dh.cols))), cellU = Math.max(2, Math.min(4, Math.floor(132 / du.cols)));
     var hs = dh.cols * cellH, hsy = dh.rows * cellH, usx = du.cols * cellU, usy = du.rows * cellU;
     var gap = 40, rowH = Math.min(22, 236 / D), ix = 10, iy = 24;
-    var x0 = 162, DW = x0 + hs + B * (gap + usx + gap + hs) + gap + 120, DH = Math.max(300, iy + D * rowH + 44);
+    var x0 = 162, DW = x0 + hs + B * (gap + usx + gap + hs) + gap + 175, DH = Math.max(300, iy + D * rowH + 44);
     var sc = Math.min(W / DW, H / DH);
     ctx.save();
     ctx.translate((W - DW * sc) / 2, (H - DH * sc) / 2);
@@ -1704,14 +1704,27 @@
 
     // Output: one number, squashed by tanh. Delta mode: a rate of change of the command.
     var ox = cx + gap + 8, f = Math.tanh(tr.mean), unit = h.delta ? ' N/s' : ' N', scaleOut = h.delta ? h.force_slew : h.force_max;
+    // The net runs on every tick, armed or not; its output reaches the drive only when the device is
+    // armed in AI mode. Otherwise this is a preview: dim it and say so.
+    var drives = S.run === 'armed' && S.mode === 'ai';
+    ctx.globalAlpha = drives ? 1 : 0.5;
     ctx.fillStyle = zeroC; ctx.fillRect(ox, midY - 48, 16, 96);
     ctx.fillStyle = f < 0 ? full[0] : full[1];
     ctx.fillRect(ox, f < 0 ? midY : midY - f * 48, 16, Math.abs(f) * 48);
     ctx.fillStyle = border; ctx.fillRect(ox - 3, midY, 22, 1);
+    ctx.globalAlpha = 1;
     ctx.fillStyle = text; ctx.font = '600 13px ' + mono; ctx.textAlign = 'left';
     var out = f * scaleOut, val = num(out, h.delta ? 0 : 1);
     if (val.charAt(0) !== '−') val = ' ' + val;
     ctx.fillText(val + unit, ox + 24, midY + 4);
+    // Above the number: is it reaching the drive? Below it, in delta mode: the number is a rate, and
+    // the force it integrates to is what the drive gets.
+    var fr = S.last;
+    ctx.font = '11px ' + mono;
+    var why = S.run === 'armed' ? 'manual · not applied' : S.run === 'maint' ? 'writing flash' : (S.run || 'idle') + ' · not applied';
+    ctx.fillStyle = drives ? cssVar('--lime-text') : muted;
+    ctx.fillText(drives ? 'driving the cart' : why, ox + 24, midY - 18);
+    if (h.delta && fr) { ctx.fillStyle = muted; ctx.fillText('force ' + signed(fr.cmd, 2) + ' N', ox + 24, midY + 22); }
     ctx.textAlign = 'center'; ctx.font = '600 12px ' + font;
     ctx.fillText(h.delta ? 'Force rate' : 'Force', ox + 8, gridY + hsy + 20);
     ctx.fillStyle = muted; ctx.font = '11px ' + font;

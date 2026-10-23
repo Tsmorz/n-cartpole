@@ -163,7 +163,7 @@
         </div>
         <div class="su-net-scroll"><canvas class="su-net" id="net" aria-label="Diagram of the policy network with live activations"></canvas></div>
         <p class="su-net-hint">Swipe sideways to see the whole network.</p>
-        <p class="eqn-note" id="net-note">Each square is one neuron, violet when positive and green when negative. Your browser downloads the device's own weights and runs the same forward pass on every observation the controller streams.</p>
+        <p class="eqn-note" id="net-note">Each square is one neuron, violet when positive and green when negative. Your browser downloads the device's own weights and runs the same forward pass on every observation the controller streams. In delta mode the output is a force <em>rate</em> (N/s) that the controller integrates into the force command; it drives the cart only when the device is armed in AI mode, otherwise it is a dimmed preview.</p>
       </section>
     </div>
   </div>
