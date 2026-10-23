@@ -31,17 +31,13 @@ task train -- --links 2 --steps 300000
 # watch a trained policy — interactive HTML replay (auto-detects link count)
 task play -- --checkpoint checkpoints/double/tqc/tqc_latest.pt
 task play -- --checkpoint checkpoints/single/tqc/tqc_latest.pt
-
-# interactive training dashboard from a metrics.csv
-task plot -- --csv checkpoints/double/tqc/metrics.csv
 ```
 
 **Checkpoint layout.** Checkpoints are organized `checkpoints/<single|double>/<tqc|tqc-goal>/`,
 so the folder alone tells you the link count and whether the policy is
 goal-conditioned — e.g. `checkpoints/double/tqc/tqc_latest.pt`. Within each folder:
 `tqc_latest.pt` (rolling most-recent, plus its replay buffer) and
-`tqc_NNNNNNN.pt` (periodic snapshots by step). `task play` and
-`task policy-map` auto-detect link count from the checkpoint itself (via the
+`tqc_NNNNNNN.pt` (periodic snapshots by step). `task play` auto-detects link count from the checkpoint itself (via the
 saved `TQCConfig`), so any checkpoint path works regardless of which folder it
 lives in.
 
@@ -83,10 +79,7 @@ git push origin models-v1
 **Visualization.** Every view renders to a self-contained, interactive **Plotly**
 HTML page (hover, zoom, play/scrub) — no static PNGs. `task play` gives a scrub-able
 cart-and-poles replay with a synced telemetry sidebar (uprightness, cart position,
-applied force, per-step reward). `task policy-map` turns the trained MLP into a
-readable control surface — a contour phase-portrait of the force the policy applies
-across a plane of states (blue = push right, red = push left), with a slider over a
-third dimension. `task plot` renders the training curves as small multiples.
+applied force, per-step reward).
 
 **Learner.** **TQC** (Truncated Quantile Critics) is the off-policy,
 distributional actor-critic that Lee et al. used for real multi-pendulum
@@ -128,8 +121,7 @@ task play -- --checkpoint checkpoints/double/tqc-goal/tqc_latest.pt --start DD -
 
 During training, the goal changes every 4–8 s, episodes start at any
 configuration, and transitions that keep failing are practiced more often.
-Training logs a start × goal success table, and `task plot` adds a
-transition-success panel. On hardware, `env.set_goal("DU")` is the command
+Training logs a start × goal success table (and `task eval-transitions` computes it for a checkpoint). On hardware, `env.set_goal("DU")` is the command
 input.
 
 **Recommended: start from the swing-up policy.** Rather than learning from
@@ -158,8 +150,6 @@ uv run python scripts/eval_swingup.py --checkpoint checkpoints/double/tqc-goal/t
 | `task download-models`  | Download a models release into`checkpoints/`                                                      |
 | `task package-models`   | Zip local checkpoints into`dist/`                                                                 |
 | `task release-models`   | Package, tag, and publish local checkpoints as a GitHub Release                                     |
-| `task plot`             | Interactive training dashboard from`metrics.csv`                                                  |
-| `task policy-map`       | Interactive input→output (force/value) control-surface map                                         |
 | `task test`             | Run tests with coverage                                                                             |
 | `task format`           | Ruff format + lint + mypy                                                                           |
 | `task ci`               | Full local CI (format + test)                                                                       |

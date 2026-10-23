@@ -145,11 +145,6 @@ tasks:
     cmds:
       - gh release download {{.CLI_ARGS}} --repo Tsmorz/n-cartpole --pattern 'n-cartpole-fw-*' --pattern SHA256SUMS --dir dist/firmware --clobber
 
-  plot:
-    desc: "Render the interactive training dashboard from checkpoints/metrics.csv"
-    cmds:
-      - uv run python scripts/plot_returns.py {{.CLI_ARGS}}
-
   test:
     desc: Run the test suite with coverage
     cmds:
