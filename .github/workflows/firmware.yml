@@ -1,0 +1,110 @@
+name: Firmware
+
+# Builds the ESP32-S3 firmware (ESP-IDF v5.3.1) on every push/PR touching firmware/,
+# and publishes a GitHub release for fw-v* tags (task fw-release -- fw-v0.2.0).
+# Release assets: n-cartpole-fw-<ver>.bin (OTA), n-cartpole-fw-<ver>-factory.bin
+# (USB flash at 0x0) and SHA256SUMS. Models are not part of a firmware release.
+
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+    tags:
+      - "fw-v*"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute the firmware version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/fw-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#fw-v}"
+          else
+            VERSION="0.0.0-dev+$(git rev-parse --short HEAD)"
+          fi
+          echo "$VERSION" > firmware/version.txt
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Firmware version: $VERSION"
+
+      - name: Build with ESP-IDF v5.3.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: firmware
+          command: idf.py build && cd build && esptool.py --chip esp32s3 merge_bin -o factory.bin @flash_args
+
+      - name: Collect the images
+        run: |
+          mkdir -p dist
+          cp firmware/build/n_cartpole_fw.bin "dist/n-cartpole-fw-$VERSION.bin"
+          cp firmware/build/factory.bin "dist/n-cartpole-fw-$VERSION-factory.bin"
+          (cd dist && sha256sum n-cartpole-fw-* > SHA256SUMS && cat SHA256SUMS)
+          ls -l dist firmware/build/*.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist/
+          if-no-files-found: error
+
+  # The rig backend (hal_rig.c: encoders, PCNT, PWM drive) is not in the release image, so
+  # compile it too: a mistake there would otherwise only show on someone's bench.
+  build-rig:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the rig backend with ESP-IDF v5.3.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.1
+          target: esp32s3
+          path: firmware
+          command: idf.py -B build-rig -D SDKCONFIG=build-rig/sdkconfig -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.rig" build
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/fw-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: dist
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Firmware $VERSION" \
+            --generate-notes

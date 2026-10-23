@@ -14,3 +14,10 @@ dist/
 checkpoints/
 *.pt
 .DS_Store
+
+# ESP-IDF firmware (firmware/build/ is covered by build/). dependencies.lock stays
+# tracked: it pins the managed components (espressif/mdns) for reproducible builds.
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/build-rig/

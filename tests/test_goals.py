@@ -28,6 +28,7 @@ from n_cartpole.env.goals import (
     goal_index,
     goal_labels,
     parse_goal_schedule,
+    parse_goal_weights,
 )
 from n_cartpole.env.hardware_config import HardwareConfig
 from n_cartpole.env.randomization import PlantRandomization
@@ -295,6 +296,35 @@ def test_curriculum_samples_failing_goals_more() -> None:
     assert np.bincount(draws, minlength=4).argmax() == 3
 
 
+def test_parse_goal_weights() -> None:
+    """Column entries scale every start, pair entries one cell; they multiply."""
+    w = np.asarray(parse_goal_weights("UU=2, DD>UU=3, dd>dd=0", 2))
+    assert w.shape == (5, 4)
+    assert w[0, 0] == 2.0  # from a random start, into UU
+    assert w[goal_index("DD", 2) + 1, 0] == 6.0
+    assert w[goal_index("DD", 2) + 1, 3] == 0.0
+    assert w[goal_index("UD", 2) + 1, 1] == 1.0  # unlisted
+
+
+@pytest.mark.parametrize("bad", ["UU", "UU=-1", "UUU=2", "UU=0,DU=0,UD=0,DD=0"])
+def test_parse_goal_weights_rejects(bad: str) -> None:
+    """Missing values, negative weights, bad labels and empty rows are errors."""
+    with pytest.raises(ValueError):
+        parse_goal_weights(bad, 2)
+
+
+def test_goal_weights_replace_curriculum() -> None:
+    """Fixed weights decide the draw, whatever the success EMA says."""
+    weights = parse_goal_weights("DD>UU=1,DD>DU=0,DD>UD=0,DD>DD=0", 2)
+    env = _goal_env(goal_weights=weights)
+    env.reset(seed=0)
+    env.transition_stats.ema[:, 0] = 1.0  # UU "mastered": the curriculum would avoid it
+    dd = goal_index("DD", 2)
+    assert {env._sample_goal(dd) for _ in range(50)} == {0}
+    with pytest.raises(ValueError, match="goal_weights"):
+        _goal_env(goal_weights=((1.0,) * 4,) * 4)  # missing the random-start row
+
+
 def test_random_start_is_from_other() -> None:
     """A random reset marks the segment start as FROM_OTHER."""
     env = _goal_env(init_random_prob=1.0)
@@ -392,6 +422,21 @@ def test_tqc_goal_training_smoke_and_resume(tmp_path: Path) -> None:
         bundle, seconds=0.6, trials=1, randomize=PlantRandomization()
     )
     assert all(len(noisy.trials[s][g]) == 1 for s in range(4) for g in range(4))
+
+
+def test_curriculum_state_survives_resume(tmp_path: Path) -> None:
+    """Success EMA and hold scales are saved and restored with the checkpoint."""
+    cfg = _tiny_tqc_cfg(tmp_path)
+    trainer = TQCTrainer(cfg)
+    trainer.env.transition_stats.ema[2, 1] = 0.7
+    trainer.env.transition_stats.count[2, 1] = 9
+    trainer.env.hold_scale[:] = [0.1, 0.2, 0.3, 0.4]
+    trainer.save(tmp_path / "t.pt")
+    fresh = TQCTrainer(cfg)
+    fresh.load(tmp_path / "t.pt")
+    assert fresh.env.transition_stats.ema[2, 1] == 0.7
+    assert fresh.env.transition_stats.count[2, 1] == 9
+    np.testing.assert_allclose(fresh.env.hold_scale, [0.1, 0.2, 0.3, 0.4])
 
 
 def test_buffer_without_raw_rejects_relabel_file(tmp_path: Path) -> None:

@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Tsmorz/n-cartpole/firmware/docs/api-schema.json",
+  "title": "n-cartpole device API",
+  "description": "The JSON the firmware sends (web.c info_get, telemetry.c build_status, events.c events_json) and the dashboard reads. tests/test_api_schema.py checks the mock against it, and a real device with NCP_DEVICE=http://<ip>. Required keys are what the page relies on; extra keys are allowed.",
+  "$defs": {
+    "u32": {"type": "integer", "minimum": 0},
+    "num": {"type": "number"},
+    "info": {
+      "type": "object",
+      "required": ["fw", "chip", "ota", "backend", "hostname", "boot", "reset_reason", "telemetry", "model"],
+      "properties": {
+        "fw": {
+          "type": "object",
+          "required": ["project", "version", "idf", "built", "repo"],
+          "properties": {
+            "project": {"const": "n_cartpole_fw"},
+            "version": {"type": "string"}, "idf": {"type": "string"},
+            "built": {"type": "string"}, "repo": {"type": "string"}
+          }
+        },
+        "chip": {
+          "type": "object",
+          "required": ["model", "cores", "revision", "mhz", "flash_mb", "psram_mb"],
+          "properties": {
+            "model": {"type": "string"}, "cores": {"$ref": "#/$defs/u32"}, "revision": {"$ref": "#/$defs/u32"},
+            "mhz": {"$ref": "#/$defs/u32"}, "flash_mb": {"$ref": "#/$defs/u32"}, "psram_mb": {"$ref": "#/$defs/u32"}
+          }
+        },
+        "ota": {
+          "type": "object",
+          "required": ["running", "next", "state"],
+          "properties": {
+            "running": {"type": "string"}, "next": {"type": "string"},
+            "state": {"enum": ["new", "pending", "valid", "invalid", "aborted", "undefined", "unknown"]}
+          }
+        },
+        "backend": {"enum": ["sim", "rig"]},
+        "hostname": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"},
+        "boot": {"$ref": "#/$defs/u32"},
+        "reset_reason": {"type": "string"},
+        "telemetry": {
+          "type": "object",
+          "required": ["version", "frame_size", "rate_hz"],
+          "properties": {"version": {"const": 1}, "frame_size": {"const": 232}, "rate_hz": {"$ref": "#/$defs/u32"}}
+        },
+        "model": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["label", "step", "n_links", "obs_dim", "hidden", "blocks", "expand", "params", "bytes",
+                           "crc32", "dtype", "weights_in", "goal_conditioned", "action_mode", "estimator",
+                           "action_history", "delay_steps", "dt", "force_max", "force_slew", "x_lim", "goals"],
+              "properties": {
+                "label": {"type": "string"}, "crc32": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+                "dtype": {"enum": ["f32", "f16"]}, "weights_in": {"enum": ["psram", "internal"]},
+                "action_mode": {"enum": ["delta", "absolute"]}, "estimator": {"enum": ["ekf", "diff"]},
+                "goal_conditioned": {"type": "boolean"},
+                "goals": {"type": "array", "items": {"type": "string", "pattern": "^[UD]{1,4}$"}},
+                "dt": {"type": "number", "exclusiveMinimum": 0}
+              }
+            }
+          ]
+        },
+        "model_error": {"type": "string"}
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": ["run", "fault", "mode", "goal", "random", "x_ref", "settled", "backend", "model", "loop", "record",
+                   "excite", "heap", "wifi", "uptime_s", "boot", "events_seq", "faults", "io", "cores", "tasks"],
+      "properties": {
+        "run": {"enum": ["idle", "armed", "fault", "maint"]},
+        "fault": {"type": "string"},
+        "mode": {"enum": ["ai", "manual"]},
+        "goal": {"type": "string", "pattern": "^([UD]{1,4})?$"},
+        "random": {"type": "boolean"}, "x_ref": {"$ref": "#/$defs/num"}, "settled": {"type": "boolean"},
+        "backend": {"enum": ["sim", "rig"]},
+        "model": {"type": ["string", "null"]},
+        "loop": {
+          "type": "object",
+          "required": ["period_us", "exec_avg_us", "exec_max_us", "policy_avg_us", "est_avg_us", "misses", "rt_factor", "budget_ok"],
+          "properties": {
+            "period_us": {"$ref": "#/$defs/u32"}, "exec_avg_us": {"$ref": "#/$defs/u32"},
+            "exec_max_us": {"$ref": "#/$defs/u32"}, "policy_avg_us": {"$ref": "#/$defs/u32"},
+            "est_avg_us": {"$ref": "#/$defs/u32"}, "misses": {"$ref": "#/$defs/u32"},
+            "rt_factor": {"type": "number", "minimum": 0, "maximum": 1.0001}, "budget_ok": {"type": "boolean"}
+          }
+        },
+        "record": {
+          "type": "object",
+          "required": ["state", "samples", "seconds", "capacity_s", "dropped", "note"],
+          "properties": {"state": {"enum": ["idle", "recording", "done"]}, "samples": {"$ref": "#/$defs/u32"}}
+        },
+        "excite": {
+          "type": "object",
+          "required": ["kind", "active", "t"],
+          "properties": {"kind": {"enum": ["none", "chirp", "prbs", "steps", "sine"]}, "active": {"type": "boolean"}}
+        },
+        "heap": {
+          "type": "object",
+          "required": ["internal_free", "internal_min", "psram_free"],
+          "properties": {"internal_free": {"$ref": "#/$defs/u32"}, "internal_min": {"$ref": "#/$defs/u32"}, "psram_free": {"$ref": "#/$defs/u32"}}
+        },
+        "wifi": {
+          "type": "object",
+          "required": ["mode", "ssid", "ip", "rssi", "join"],
+          "properties": {
+            "mode": {"enum": ["sta", "ap"]}, "ssid": {"type": "string"}, "ip": {"type": "string"}, "rssi": {"type": "integer"},
+            "join": {
+              "type": "object",
+              "required": ["state", "ssid", "ip", "error"],
+              "properties": {"state": {"enum": ["idle", "connecting", "ok", "failed"]}}
+            }
+          }
+        },
+        "uptime_s": {"$ref": "#/$defs/u32"},
+        "boot": {"$ref": "#/$defs/u32"},
+        "events_seq": {"$ref": "#/$defs/u32"},
+        "unix": {"type": "integer", "minimum": 1700000000},
+        "faults": {
+          "type": "object",
+          "required": ["count", "last"],
+          "properties": {"count": {"$ref": "#/$defs/u32"}, "last": {"type": "string"}, "ago_s": {"type": "number", "minimum": 0}}
+        },
+        "io": {
+          "oneOf": [
+            {"type": "object", "required": ["rig"], "properties": {"rig": {"const": false}}, "additionalProperties": false},
+            {
+              "type": "object",
+              "required": ["rig", "estop", "drive", "duty", "dir", "cart_count", "read_errors", "enc"],
+              "properties": {
+                "rig": {"const": true}, "estop": {"type": "boolean"}, "drive": {"type": "boolean"},
+                "duty": {"type": "number", "minimum": 0, "maximum": 1}, "dir": {"enum": [-1, 1]},
+                "cart_count": {"type": "integer"}, "read_errors": {"$ref": "#/$defs/u32"},
+                "enc": {
+                  "type": "array", "minItems": 2, "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "required": ["raw", "bad"],
+                    "properties": {
+                      "raw": {"type": "integer", "minimum": 0, "maximum": 16383}, "bad": {"$ref": "#/$defs/u32"},
+                      "agc": {"type": "integer", "minimum": 0, "maximum": 255},
+                      "ocf": {"type": "boolean"}, "cof": {"type": "boolean"},
+                      "comp_low": {"type": "boolean"}, "comp_high": {"type": "boolean"}
+                    },
+                    "dependentRequired": {"agc": ["ocf", "cof", "comp_low", "comp_high"]}
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "calib": {
+          "type": "object",
+          "required": ["angles", "cart"],
+          "properties": {
+            "angles": {"type": "boolean"}, "cart": {"type": "boolean"},
+            "off1": {"$ref": "#/$defs/num"}, "off2": {"$ref": "#/$defs/num"}, "x_zero": {"$ref": "#/$defs/num"},
+            "angles_boot": {"$ref": "#/$defs/u32"}, "cart_boot": {"$ref": "#/$defs/u32"},
+            "angles_unix": {"type": "integer", "minimum": 1700000000}, "cart_unix": {"type": "integer", "minimum": 1700000000}
+          },
+          "dependentRequired": {"off1": ["off2", "angles_boot"], "x_zero": ["cart_boot"]}
+        },
+        "cores": {
+          "type": "array",
+          "items": {"type": "object", "required": ["id", "load"], "properties": {"id": {"enum": [0, 1]}, "load": {"type": "number", "minimum": 0, "maximum": 100}}}
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "core", "prio", "cpu", "stack_free"],
+            "properties": {"name": {"type": "string"}, "core": {"enum": [-1, 0, 1]}, "cpu": {"type": "number", "minimum": 0}}
+          }
+        }
+      },
+      "if": {"properties": {"backend": {"const": "rig"}}},
+      "then": {"required": ["calib"], "properties": {"io": {"properties": {"rig": {"const": true}}}}},
+      "else": {"not": {"required": ["calib"]}, "properties": {"io": {"properties": {"rig": {"const": false}}}}}
+    },
+    "events": {
+      "type": "object",
+      "required": ["seq", "boot", "uptime_ms", "events"],
+      "properties": {
+        "seq": {"$ref": "#/$defs/u32"}, "boot": {"$ref": "#/$defs/u32"}, "uptime_ms": {"$ref": "#/$defs/u32"},
+        "events": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "required": ["seq", "boot", "t_ms", "level", "msg"],
+            "properties": {
+              "seq": {"type": "integer", "minimum": 1}, "boot": {"$ref": "#/$defs/u32"}, "t_ms": {"$ref": "#/$defs/u32"},
+              "unix": {"type": "integer", "minimum": 1700000000},
+              "level": {"enum": ["info", "warn", "error"]}, "msg": {"type": "string", "maxLength": 71}
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  }
+}

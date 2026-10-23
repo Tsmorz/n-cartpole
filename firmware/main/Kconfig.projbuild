@@ -1,0 +1,129 @@
+menu "n-cartpole"
+
+    choice NCP_BACKEND
+        prompt "Plant backend"
+        default NCP_BACKEND_SIM
+        help
+            sim: the plant is simulated on the chip (ncp_sim) with the model's encoder
+            model, so the firmware runs on a bare dev board. rig: the real hardware
+            (2 x AS5048A joint encoders, quadrature cart encoder, PWM/DIR/EN drive).
+
+        config NCP_BACKEND_SIM
+            bool "Simulated plant (no hardware)"
+        config NCP_BACKEND_RIG
+            bool "Real rig"
+    endchoice
+
+    config NCP_HOSTNAME
+        string "Hostname (mDNS <hostname>.local)"
+        default "cartpole"
+
+    config NCP_WIFI_SSID
+        string "Default Wi-Fi SSID (empty: start the setup access point)"
+        default ""
+        help
+            Used when no credentials are stored in NVS (POST /api/wifi stores them).
+
+    config NCP_WIFI_PASSWORD
+        string "Default Wi-Fi password"
+        default ""
+
+    config NCP_RECORD_SECONDS
+        int "Recording buffer capacity (seconds at the control rate, in PSRAM)"
+        range 5 600
+        default 120
+        help
+            One 128-byte sample per control tick: 120 s at 200 Hz is about 3 MB of PSRAM.
+            The buffer is allocated when a recording starts and shrinks if PSRAM is short.
+
+    menu "Rig hardware"
+        depends on NCP_BACKEND_RIG
+
+        config NCP_SPI_SCLK_GPIO
+            int "Encoder SPI SCLK GPIO"
+            range 0 48
+            default 12
+        config NCP_SPI_MISO_GPIO
+            int "Encoder SPI MISO GPIO"
+            range 0 48
+            default 13
+        config NCP_SPI_MOSI_GPIO
+            int "Encoder SPI MOSI GPIO"
+            range 0 48
+            default 11
+        config NCP_ENC1_CS_GPIO
+            int "Joint-1 encoder (AS5048A) CS GPIO"
+            range 0 48
+            default 10
+        config NCP_ENC2_CS_GPIO
+            int "Joint-2 encoder (AS5048A, through the slip ring) CS GPIO"
+            range 0 48
+            default 9
+        config NCP_SPI_CLOCK_HZ
+            int "Encoder SPI clock (Hz)"
+            range 100000 10000000
+            default 1000000
+            help
+                Kept modest: the joint-2 encoder's lines run through the slip ring.
+        config NCP_ENC1_REVERSED
+            bool "Joint-1 encoder counts against the model's angle direction"
+            default n
+        config NCP_ENC2_REVERSED
+            bool "Joint-2 encoder counts against the model's angle direction"
+            default n
+        config NCP_ENC_ERROR_LIMIT
+            int "Consecutive bad encoder reads before FAULT"
+            range 1 100
+            default 3
+
+        config NCP_QUAD_A_GPIO
+            int "Motor encoder channel A GPIO"
+            range 0 48
+            default 4
+        config NCP_QUAD_B_GPIO
+            int "Motor encoder channel B GPIO"
+            range 0 48
+            default 5
+        config NCP_MOTOR_CPR
+            int "Motor encoder counts per revolution (after x4 decoding)"
+            range 4 1000000
+            default 4000
+        config NCP_PULLEY_RADIUS_UM
+            int "Drive pulley pitch radius (micrometres)"
+            range 1000 100000
+            default 6350
+        config NCP_CART_REVERSED
+            bool "Cart encoder counts against +x"
+            default n
+
+        config NCP_PWM_GPIO
+            int "Drive PWM GPIO (duty = |F| / full scale)"
+            range 0 48
+            default 6
+        config NCP_DIR_GPIO
+            int "Drive DIR GPIO (high = +x force)"
+            range 0 48
+            default 7
+        config NCP_EN_GPIO
+            int "Drive enable GPIO (high = enabled; add a pull-down on the board)"
+            range 0 48
+            default 15
+        config NCP_PWM_FREQ_HZ
+            int "Drive PWM frequency (Hz)"
+            range 1000 40000
+            default 20000
+        config NCP_PWM_FULL_SCALE_MN
+            int "Force at 100 % PWM duty (millinewtons)"
+            range 100 1000000
+            default 15350
+        config NCP_DIR_REVERSED
+            bool "Invert the DIR pin (low = +x force)"
+            default n
+
+        config NCP_ESTOP_GPIO
+            int "E-stop sense GPIO (active high; -1 = none)"
+            range -1 48
+            default 16
+    endmenu
+
+endmenu

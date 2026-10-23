@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
 
 env:
   PYTHON_VERSION: "3.13"
@@ -69,8 +69,23 @@ jobs:
         env:
           UV_PYTHON: ${{ matrix.python-version }}
 
+      - name: Install Chromium for the dashboard tests
+        run: uv run playwright install --with-deps chromium
+
       - name: Run tests
-        run: task test
+        shell: bash  # with pipefail, so tee does not hide a failing exit status
+        run: task test 2>&1 | tee test.log
+
+      # The step log is only readable when signed in; annotations are visible to everyone (and
+      # through the API), so surface what failed. GitHub shows at most 10 per level and step.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^(FAILED|ERROR) " test.log | head -10 | while IFS= read -r l; do echo "::error title=pytest::${l:0:900}"; done
+          grep -E "^E  " test.log | head -5 | while IFS= read -r l; do echo "::warning title=pytest assertion::${l:0:900}"; done
+          # The failing source line (pytest marks it with ">") and the file:line it raised at.
+          grep -E "^(>|tests/[^ ]+:[0-9]+: )" test.log | head -5 | while IFS= read -r l; do echo "::warning title=pytest location::${l:0:900}"; done
 
       - name: Upload coverage to Coveralls
         if: matrix.python-version == '3.13'

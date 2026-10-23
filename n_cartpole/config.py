@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import tomllib
 from pathlib import Path
@@ -216,3 +217,91 @@ def load_tqc_config(path: str | Path) -> TQCConfig:
         checkpoint_every=tqc.get("checkpoint_every", 25_000),
         log_every=tqc.get("log_every", 5_000),
     )
+
+
+# Sensor-model fields that belong to the policy's observation pipeline (kept from
+# the checkpoint when its plant is replaced) vs the encoder hardware (replaced).
+_POLICY_SENSOR_FIELDS = (
+    "estimator",
+    "ekf_force_std",
+    "ekf_accel_std",
+    "velocity_filter",
+)
+
+
+def _diff(prefix: str, old: object, new: object) -> list[str]:
+    if dataclasses.is_dataclass(old) and dataclasses.is_dataclass(new):
+        out: list[str] = []
+        for f in dataclasses.fields(old):
+            out += _diff(
+                f"{prefix}.{f.name}", getattr(old, f.name), getattr(new, f.name)
+            )
+        return out
+    same = old == new
+    if not isinstance(same, bool):  # numpy arrays / mixed sequences
+        try:
+            same = bool(
+                len(old) == len(new)  # type: ignore[arg-type]
+                and all(float(a) == float(b) for a, b in zip(old, new, strict=True))  # type: ignore[call-overload]
+            )
+        except TypeError:
+            same = False
+    return [] if same else [f"{prefix}: {old!r} -> {new!r}"]
+
+
+def replace_plant(env: EnvConfig, plant: EnvConfig) -> tuple[EnvConfig, list[str]]:
+    """Give a resumed run's env the plant of another config (e.g. a sysid fit).
+
+    Replaced: ``physics``, the hardware pipeline (delay, encoder noise and
+    resolution) and ``randomize``. Kept: everything that defines the policy's
+    inputs and outputs (link count, goal and action settings, observation extras,
+    the sysID block, the velocity estimator and its tuning, the slew limit the
+    delta actions are defined by, the reward). Returns the new env and a list of
+    ``"field: old -> new"`` changes.
+
+    Raises:
+        ValueError: if the link count or the control period differ, or the
+            policy reads a sysID block the new config has no hardware for.
+
+    """
+    if plant.n_links != env.n_links:
+        raise ValueError(
+            f"config has {plant.n_links} links, the checkpoint {env.n_links}"
+        )
+    if plant.physics.dt != env.physics.dt:
+        raise ValueError(
+            f"config dt {plant.physics.dt} != checkpoint dt {env.physics.dt}: "
+            "the policy is tied to its control period"
+        )
+    old_hw = env.hardware
+    sysid = old_hw is not None and old_hw.sysid_context
+    hw = plant.hardware
+    if hw is None:
+        if sysid:
+            raise ValueError(
+                "the policy reads a sysID block; the config has no [hardware]"
+            )
+    else:
+        sensors = hw.sensors
+        if sensors is not None and old_hw is not None and old_hw.sensors is not None:
+            kept = {k: getattr(old_hw.sensors, k) for k in _POLICY_SENSOR_FIELDS}
+            sensors = dataclasses.replace(sensors, **kept)
+        hw = dataclasses.replace(
+            hw, physics=plant.physics, sysid_context=sysid, sensors=sensors
+        )
+    new = dataclasses.replace(
+        env, physics=plant.physics, hardware=hw, randomize=plant.randomize
+    )
+    changes = _diff("physics", env.physics, new.physics)
+    if (old_hw is None) != (hw is None):
+        changes.append(f"hardware: {old_hw!r} -> {hw!r}")
+    elif old_hw is not None and hw is not None:
+        changes += _diff("hardware.delay_steps", old_hw.delay_steps, hw.delay_steps)
+        changes += _diff("hardware.sensors", old_hw.sensors, hw.sensors)
+    changes += _diff("randomize", env.randomize, new.randomize)
+    if plant.force_slew != env.force_slew:
+        changes.append(
+            f"(kept force_slew {env.force_slew}: the config's {plant.force_slew} "
+            "would change what the policy's actions mean)"
+        )
+    return new, changes

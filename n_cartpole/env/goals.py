@@ -76,6 +76,35 @@ def parse_goal_schedule(spec: str, n_links: int) -> list[tuple[float, int]]:
     return sorted(out)
 
 
+def parse_goal_weights(spec: str, n_links: int) -> tuple[tuple[float, ...], ...]:
+    """Parse ``"UU=2,DD>UU=3"`` into a goal-sampling weight table.
+
+    ``TO=w`` scales every transition into ``TO`` (also from a random start);
+    ``FROM>TO=w`` scales one transition. Entries multiply and unlisted ones stay
+    1. The table is indexed ``[from + 1][to]`` like :class:`TransitionStats`, so
+    row 0 is :data:`FROM_OTHER`.
+    """
+    n_goals = 2**n_links
+    w = np.ones((n_goals + 1, n_goals))
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        key, eq, value = part.partition("=")
+        if not eq:
+            raise ValueError(f"goal weight {part!r} needs a value, e.g. UU=2")
+        weight = float(value)
+        if weight < 0:
+            raise ValueError(f"goal weight {part!r} must be >= 0")
+        frm, arrow, to = key.partition(">")
+        if arrow:
+            w[goal_index(frm, n_links) + 1, goal_index(to, n_links)] *= weight
+        else:
+            w[:, goal_index(key, n_links)] *= weight
+    if not (w.sum(axis=1) > 0).all():
+        raise ValueError(f"goal weights {spec!r} leave some start with no goal")
+    return tuple(tuple(float(x) for x in row) for row in w)
+
+
 class TransitionStats:
     """Success statistics per ``(from, to)`` transition.
 

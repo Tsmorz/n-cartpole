@@ -7,6 +7,7 @@ hardware; it is this project's only learner.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 import re
 from dataclasses import dataclass, field
@@ -70,6 +71,11 @@ class TQCConfig:
     env: EnvConfig = field(default_factory=EnvConfig)
     device: str = "auto"
     hidden: int = 256
+    # The actor may be smaller than the critics (e.g. a distilled student that
+    # fits a microcontroller, fine-tuned against the teacher's critics: only the
+    # actor is deployed). None = ``hidden``.
+    actor_hidden: int | None = None
+    actor_blocks: int = 2
     n_critics: int = 2
     n_quantiles: int = 25
     top_quantiles_to_drop: int = 2  # dropped from the pooled n_critics*n_quantiles
@@ -279,9 +285,12 @@ class TQCTrainer:
 
         obs_dim, mirror_sign = env_spec(self.cfg.env)
         fmax = self.cfg.env.physics.force_max
-        self.actor = SquashedGaussianActor(self.cfg.hidden, fmax, obs_dim=obs_dim).to(
-            self.device
-        )
+        self.actor = SquashedGaussianActor(
+            self.cfg.actor_hidden or self.cfg.hidden,
+            fmax,
+            blocks=self.cfg.actor_blocks,
+            obs_dim=obs_dim,
+        ).to(self.device)
         self.critic = QuantileCritic(
             self.cfg.hidden, self.cfg.n_critics, self.cfg.n_quantiles, obs_dim=obs_dim
         ).to(self.device)
@@ -561,6 +570,8 @@ class TQCTrainer:
                 "step": self.step,
                 "cfg": self.cfg,
                 "algo": "tqc",
+                "actor_blocks": self.cfg.actor_blocks,
+                "curriculum": self._curriculum_state(),
             },
             path,
         )
@@ -595,6 +606,8 @@ class TQCTrainer:
             )
             m = re.search(r"tqc_(\d+)$", path.stem)
             self.step = int(m.group(1)) if m else 0
+        if ckpt.get("curriculum") is not None:
+            self._restore_curriculum(ckpt["curriculum"])
         buf = self.buffer_path(path)
         if buf.exists():
             self.buffer.load(buf)
@@ -603,6 +616,82 @@ class TQCTrainer:
             logger.warning("No replay buffer found; refilling before updates.")
         self.resumed = True
         logger.info(f"Loaded checkpoint ← {path} (step {self.step})")
+
+    def _curriculum_state(self) -> dict[str, np.ndarray] | None:
+        """Return the env's goal curriculum (success EMA/totals, hold scales)."""
+        if not self.goal_conditioned:
+            return None
+        stats = self.env.transition_stats
+        return {
+            "ema": stats.ema.copy(),
+            "count": stats.count.copy(),
+            "success": stats.success.copy(),
+            "hold_scale": np.asarray(self.env.hold_scale).copy(),
+        }
+
+    def _restore_curriculum(self, state: dict[str, np.ndarray]) -> None:
+        """Resume the goal curriculum where the checkpoint left it."""
+        stats = self.env.transition_stats
+        if not self.goal_conditioned or np.shape(state["ema"]) != stats.ema.shape:
+            return
+        stats.ema[:] = state["ema"]
+        stats.count[:] = state["count"]
+        stats.success[:] = state["success"]
+        self.env.hold_scale[:] = state["hold_scale"]
+        logger.info(
+            "Restored goal curriculum (hold start perturbation: "
+            + "  ".join(
+                f"{g} {s:.2f}"
+                for g, s in zip(self.env.goal_labels, self.env.hold_scale, strict=True)
+            )
+            + ")"
+        )
+
+    def replace_actor(self, path: Path) -> None:
+        """Swap in a smaller actor (a distilled student) and keep everything else.
+
+        Called after :meth:`load` on the teacher's checkpoint: the critics, target
+        critics, temperature, normalizer and replay buffer stay the teacher's — they
+        judge (observation, action) pairs and do not depend on the actor's size —
+        so RL fine-tuning of the student starts against critics that already fit
+        this plant. The student's log-std head is untrained by distillation; it is
+        set to the teacher's mean log-std on buffer observations so exploration
+        starts where the teacher's was.
+        """
+        src = torch.load(path, map_location=self.device, weights_only=False)
+        src_cfg = src["cfg"]
+        hidden = int(getattr(src_cfg, "actor_hidden", None) or src_cfg.hidden)
+        blocks = int(src.get("actor_blocks", 2))
+        obs_dim = self.actor.obs_dim
+        log_std = self._teacher_log_std()
+        actor = SquashedGaussianActor(
+            hidden, self.actor.force_max, blocks=blocks, obs_dim=obs_dim
+        ).to(self.device)
+        actor.load_state_dict(src["actor"])
+        with torch.no_grad():
+            actor.net.out_proj.weight[1].zero_()
+            actor.net.out_proj.bias[1] = log_std
+        lr = self.actor_opt.param_groups[0]["lr"]
+        self.actor = actor
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        self.cfg = dataclasses.replace(
+            self.cfg, actor_hidden=hidden, actor_blocks=blocks
+        )
+        n_params = sum(p.numel() for p in actor.parameters())
+        logger.info(
+            f"Actor replaced by {path}: hidden {hidden} x {blocks} blocks "
+            f"({n_params} parameters), log-std {log_std:.2f}; critics hidden "
+            f"{self.cfg.hidden} kept"
+        )
+
+    def _teacher_log_std(self) -> float:
+        """Mean log-std of the current actor over (up to 4096) buffer observations."""
+        n = min(self.buffer.size, 4096)
+        if n == 0:
+            return float(np.log(0.1 * self.actor.force_max))
+        with torch.no_grad():
+            _, log_std = self.actor._mean_logstd(self._normalize(self.buffer.obs[:n]))
+        return float(log_std.mean())
 
     def warm_start(self, path: Path) -> None:
         """Initialize this goal-conditioned run from a plain (non-goal) checkpoint.

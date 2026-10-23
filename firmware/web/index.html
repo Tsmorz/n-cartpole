@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5f6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1b1c1f" media="(prefers-color-scheme: dark)">
+  <title>cartpole · live controller</title>
+  <meta name="description" content="Dashboard of the n-cartpole ESP32-S3 controller: live double pendulum, the policy network's activations, loop health, and firmware/model updates.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='3 6.6 28 28'%3E%3Cline x1='6.5' y1='29' x2='28.5' y2='29' stroke='%234b505e' stroke-width='1.5' stroke-linecap='round'/%3E%3Cg transform='translate(4.5 0)'%3E%3Crect x='9.5' y='22.5' width='13' height='6' rx='1.5' fill='%235d6373'/%3E%3Cg stroke='%232f3340' stroke-width='2.2' stroke-linecap='round'%3E%3Cline x1='16' y1='26' x2='14.8' y2='14.1'/%3E%3Cline x1='14.8' y1='14.1' x2='3.2' y2='17.2'/%3E%3C/g%3E%3Ccircle cx='14.8' cy='14.1' r='2.6' fill='%235a4fd6'/%3E%3Ccircle cx='3.2' cy='17.2' r='2.6' fill='%2335a02a'/%3E%3C/g%3E%3C/svg%3E">
+  <!-- The site's fonts. Loaded without blocking: on the device's own access point there is no internet,
+       and the stacks in style.css fall back to system fonts. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    // Theme before first paint: ?theme=dark|light (not remembered), else the saved choice, else the OS.
+    (function () {
+      try {
+        var q = /[?&]theme=(dark|light)/.exec(location.search);
+        var t = q ? q[1] : localStorage.getItem('theme');
+        if (t) document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <nav class="nav" aria-label="Device">
+      <a class="nav-brand" href="./" aria-label="Dashboard home">
+        <svg class="logo logo-cartpole" viewBox="3 6.6 28 28" width="38" height="38" aria-hidden="true">
+          <line class="logo-ground" x1="6.5" y1="29" x2="28.5" y2="29" stroke-width="1.5" stroke-linecap="round"/>
+          <g transform="translate(4.5 0)">
+            <rect class="logo-cart" x="9.5" y="22.5" width="13" height="6" rx="1.5"/>
+            <g stroke-width="2.2" stroke-linecap="round">
+              <line class="logo-rod" x1="16.0" y1="26.0" x2="14.8" y2="14.1"/>
+              <line class="logo-rod" x1="14.8" y1="14.1" x2="3.2" y2="17.2"/>
+            </g>
+            <circle class="logo-b1" cx="14.8" cy="14.1" r="2.6"/>
+            <circle class="logo-b2" cx="3.2" cy="17.2" r="2.6"/>
+          </g>
+        </svg>
+        <span class="brand-host"><span id="hostname">cartpole</span><span class="brand-sub">.local</span></span>
+      </a>
+      <div class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" type="button" role="tab" id="tab-btn-live" data-tab="live" aria-controls="tab-live" aria-selected="true">Live</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-health" data-tab="health" aria-controls="tab-health" aria-selected="false" tabindex="-1">Health</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-record" data-tab="record" aria-controls="tab-record" aria-selected="false" tabindex="-1">Record</button>
+        <button class="tab" type="button" role="tab" id="tab-btn-settings" data-tab="settings" aria-controls="tab-settings" aria-selected="false" tabindex="-1">Settings</button>
+      </div>
+      <div class="nav-chips">
+        <span class="chip chip-conn" id="conn" data-state="connecting" role="status" aria-live="polite"><span class="dot"></span><span id="conn-text">connecting</span></span>
+        <button class="chip chip-run" id="run-chip" type="button" data-run="" title="Controller state. Esc disarms from any tab."><span class="dot"></span><span id="run-chip-text">—</span></button>
+        <span class="chip chip-rec" id="rec-chip" hidden title="Recording for system identification"><span class="dot"></span>REC <b id="rec-chip-t">0.0 s</b></span>
+        <span class="chip chip-backend" id="backend" data-backend="" title="Plant backend">—</span>
+        <a class="chip chip-hide-md chip-model" id="model-chip" href="#settings" title="Model on the device (details in Settings)">model <b id="model-label">—</b></a>
+      </div>
+      <button class="theme-toggle" type="button" role="switch" aria-label="Dark mode" title="Toggle color theme">
+        <span class="tt-opt tt-light"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5.4"/><path d="M12 2.5v1.5M12 21.5V20M2.5 12H4M21.5 12H20M5.3 5.3l1.1 1.1M18.7 5.3l-1.1 1.1M5.3 18.7l1.1-1.1M18.7 18.7l-1.1-1.1"/></svg></span>
+        <span class="tt-opt tt-dark"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path transform="translate(1.3 -1.3)" d="M5.6 5.6A9 9 0 0 0 18.4 18.4A12 12 0 0 1 5.6 5.6Z"/></svg></span>
+      </button>
+    </nav>
+  </header>
+
+  <div class="stale-banner" id="stale-banner" role="status" aria-live="polite" hidden><span class="dot"></span><span id="stale-text">Connection lost: the values below are frozen.</span><button class="banner-btn" type="button" onclick="location.reload()">Reload</button></div>
+
+  <main id="main">
+  <div class="tab-panel" id="tab-live" role="tabpanel" aria-labelledby="tab-btn-live">
+    <section class="wrap page-head">
+      <div>
+        <span class="eyebrow" id="eyebrow">esp32-s3 · double pendulum on a cart</span>
+        <h1 class="page-title">Live controller</h1>
+        <p class="page-sub">The TQC policy runs on the chip's second core every control tick. Arm it, pick a target pose, and watch the network think. Esc disarms from any tab.</p>
+      </div>
+      <ul class="head-facts" aria-label="At a glance">
+        <li><b id="fact-rate">—</b>control rate</li>
+        <li><b id="fact-exec">—</b>loop load</li>
+        <li><b id="fact-miss">—</b>misses / min</li>
+        <li><b id="fact-link">—</b>telemetry</li>
+      </ul>
+    </section>
+
+    <div class="wrap">
+      <div class="sim-layout">
+        <div class="sim-canvas-wrap sim-stack">
+          <div class="sim-cell">
+            <canvas class="sim-canvas" id="scene" aria-label="The cart and both links as the controller estimates them. Dashed outlines: the target pose. The lime marker on the rail is the cart setpoint."></canvas>
+            <div class="scene-overlay">
+              <div class="run-block">
+                <span class="run-badge" id="run-badge" data-run="idle"><span class="run-dot"></span><span id="run-text">IDLE</span><span class="run-reason" id="run-reason"></span></span>
+                <span class="run-sub" id="run-sub"></span>
+                <span class="run-last" id="run-last"></span>
+              </div>
+              <div class="reach" id="reach" aria-live="polite" hidden>
+                <span class="reach-val" id="reach-val">-</span>
+                <span class="reach-lbl" id="reach-lbl">time to target (s)</span>
+                <span class="reach-state" id="reach-state"></span>
+              </div>
+            </div>
+          </div>
+          <div class="sim-cell"><canvas class="sim-states" id="plot" aria-label="Last 6 seconds of cart position, link angles, and force (command solid, applied dashed)"></canvas></div>
+        </div>
+
+        <aside class="sim-panel" aria-label="Controller">
+          <h3>Controller</h3>
+          <button class="arm-btn" data-arm type="button" aria-pressed="false" title="Arm sends the commands to the drive. Esc disarms from anywhere on the page.">
+            <span class="arm-dot" aria-hidden="true"></span><span class="arm-label">Arm</span><span class="arm-key">esc</span>
+          </button>
+          <div class="mode-toggle" role="group" aria-label="Who is in control">
+            <button class="mode-btn" type="button" data-mode="manual" aria-pressed="false">Manual</button>
+            <button class="mode-btn" type="button" data-mode="ai" aria-pressed="false">AI</button>
+          </div>
+          <p class="panel-hint" id="mode-hint"><strong>AI:</strong> the network drives to the target and balances around the slider position.</p>
+
+          <h3>Target</h3>
+          <div class="goal-grid" id="goal-grid" role="group" aria-label="Target pose">
+            <button class="goal-btn goal-btn-random" type="button" id="goal-random" aria-pressed="false" title="A new target 1 s after each one is reached, until you pick a specific target">
+              <span class="goal-label">Random</span>
+            </button>
+          </div>
+
+          <div class="pid-group">
+            <label for="xref">Cart x<sub>ref</sub> <span id="xref-val">+0.00 m</span></label>
+            <input type="range" id="xref" min="-0.25" max="0.25" step="0.01" value="0" aria-describedby="xref-hint">
+            <div class="range-scale"><span id="xref-min">−0.25</span><span>0</span><span id="xref-max">+0.25</span></div>
+          </div>
+          <p class="panel-hint" id="xref-hint">Double-click the slider to centre.</p>
+
+          <div id="sim-tools" hidden>
+            <h3>Reset pose <span class="h3-tag">sim</span></h3>
+            <div class="pose-row" id="pose-row" role="group" aria-label="Restart the simulated plant at a pose"></div>
+          </div>
+          <div id="rig-tools" hidden>
+            <h3>Calibrate <span class="h3-tag">rig, disarmed</span></h3>
+            <div class="btn-row">
+              <button class="sim-btn" type="button" id="zero-angles" title="With both links hanging at rest: θ₁ = π, φ = 0">Zero angles</button>
+              <button class="sim-btn" type="button" id="zero-cart" title="The cart's current position becomes x = 0">Zero cart</button>
+            </div>
+            <p class="panel-hint" id="cal-line"></p>
+          </div>
+          <p class="panel-msg" id="cmd-msg" aria-live="polite"></p>
+
+          <h3 class="panel-push">State <span class="h3-tag" id="ro-tick"></span></h3>
+          <table class="readout" aria-label="State: the controller's estimate, the encoder readings and (sim) the true state">
+            <thead><tr><th scope="col"></th><th scope="col" title="What the policy sees (EKF or differenced encoders)">est</th><th scope="col" title="Calibrated encoder readings (positions only)">meas</th><th scope="col" id="ro-true-h" title="The simulator's true state">true</th></tr></thead>
+            <tbody id="ro-rows"></tbody>
+          </table>
+          <dl class="kv kv-tight" id="ro-kv"><dt>force</dt><dd>—</dd></dl>
+        </aside>
+      </div>
+
+      <section class="nn-netviz" aria-labelledby="net-title">
+        <div class="nn-netviz-head">
+          <h3 id="net-title">Inside the network</h3>
+          <span class="nn-meta" id="nn-meta"></span>
+          <div class="nn-legend" aria-hidden="true">
+            <span class="nn-legend-cap">−</span><span class="nn-legend-bar"></span><span class="nn-legend-cap">+</span>
+            <span class="nn-legend-txt">activation</span>
+          </div>
+        </div>
+        <div class="su-net-scroll"><canvas class="su-net" id="net" aria-label="Diagram of the policy network with live activations"></canvas></div>
+        <p class="su-net-hint">Swipe sideways to see the whole network.</p>
+        <p class="eqn-note" id="net-note">Each square is one neuron, violet when positive and green when negative. Your browser downloads the device's own weights and runs the same forward pass on every observation the controller streams.</p>
+      </section>
+    </div>
+  </div>
+  <div class="tab-panel wrap" id="tab-health" role="tabpanel" aria-labelledby="tab-btn-health" hidden>
+    <div class="tab-head"><h2 class="tab-title">Health</h2><p class="tab-sub">Loop timing, the two cores and their tasks, memory, and the link to this page.</p></div>
+    <div class="cards">
+              <section class="card" id="card-health" aria-labelledby="h-health">
+                <div class="card-head"><span class="card-label">loop</span><h3 id="h-health">Control loop</h3><span class="tag" id="budget-tag">—</span></div>
+                <div class="meter" id="loop-meter">
+                  <div class="meter-top"><span>exec / period</span><span><b id="loop-exec">—</b> / <span id="loop-period">—</span></span></div>
+                  <div class="meter-track" style="margin-top:.9rem">
+                    <span class="meter-fill" id="seg-pol"></span>
+                    <span class="meter-fill seg-est" id="seg-est"></span>
+                    <span class="meter-fill seg-rest" id="seg-rest"></span>
+                    <span class="meter-budget" style="left:80%" data-label="80 % budget"></span>
+                    <span class="meter-max" id="loop-max" style="left:0"></span>
+                  </div>
+                  <div class="meter-legend"><span><i style="background:var(--viz-1)"></i>policy</span><span><i style="background:var(--viz-4)"></i>estimator</span><span><i style="background:var(--viz-7);opacity:.55"></i>rest</span><span><i style="background:var(--viz-2)"></i>max</span></div>
+                </div>
+                <div class="spark"><canvas id="spark" aria-label="Execution time of each streamed tick over the last 6 seconds, against the period and the 80 % budget"></canvas></div>
+                <div class="spark spark-long"><canvas id="spark-long" aria-label="The last 5 minutes: average and worst execution time per status message against the control period, with red marks where deadlines were missed"></canvas></div>
+                <dl class="kv">
+                  <dt>policy</dt><dd id="h-pol">—</dd>
+                  <dt>estimator</dt><dd id="h-est">—</dd>
+                  <dt>exec max</dt><dd id="h-max">—</dd>
+                  <dt>deadline misses</dt><dd id="h-miss">—</dd>
+                  <dt>real-time factor</dt><dd id="h-rt">—</dd>
+                </dl>
+                <p class="panel-hint" id="h-note"></p>
+              </section>
+              <section class="card span-2 row-2" id="card-cores" aria-labelledby="h-cores">
+                <div class="card-head"><span class="card-label">freertos</span><h3 id="h-cores">Cores &amp; tasks</h3><span class="tag" id="layout-tag">—</span></div>
+                <div class="card-split">
+                  <div class="meter core-meter">
+                    <div class="meter-top"><span>core 0 · PRO</span><b id="core0-load">—</b></div>
+                    <div class="meter-track"><span class="meter-fill" id="core0-fill"></span><span class="meter-budget" style="left:80%" data-label=""></span></div>
+                    <span class="meter-sub">Wi-Fi · lwIP · httpd · telemetry</span>
+                  </div>
+                  <div class="meter core-meter">
+                    <div class="meter-top"><span>core 1 · APP</span><b id="core1-load">—</b></div>
+                    <div class="meter-track"><span class="meter-fill" id="core1-fill"></span><span class="meter-budget" style="left:80%" data-label=""></span></div>
+                    <span class="meter-sub">the control loop, alone</span>
+                  </div>
+                </div>
+                <div class="table-wrap">
+                  <table class="tasks" aria-label="FreeRTOS tasks">
+                    <thead><tr><th scope="col">task</th><th scope="col">core</th><th scope="col">prio</th><th scope="col">cpu</th><th scope="col">stack free</th></tr></thead>
+                    <tbody id="task-rows"><tr><td colspan="5" class="muted">waiting for the device…</td></tr></tbody>
+                  </table>
+                </div>
+                <p class="check-line" id="layout-check"></p>
+              </section>
+              <section class="card" id="card-device" aria-labelledby="h-device">
+                <div class="card-head"><span class="card-label">device</span><h3 id="h-device">Memory &amp; link</h3><span class="tag" id="up-tag">—</span></div>
+                <dl class="kv" id="dev-kv"><dt>internal free</dt><dd>—</dd></dl>
+                <p class="panel-hint">Telemetry is what this page receives: frames per second against the device's rate, and gaps in the tick count (frames lost on Wi-Fi).</p>
+              </section>
+              <section class="card span-2" id="card-io" aria-labelledby="h-io">
+                <div class="card-head"><span class="card-label">rig</span><h3 id="h-io">Sensors &amp; drive</h3><span class="tag" id="io-tag">—</span></div>
+                <div id="io-body"><p class="panel-hint">Waiting for the device…</p></div>
+              </section>
+              <section class="card" id="card-log" aria-labelledby="h-log">
+                <div class="card-head"><span class="card-label">events</span><h3 id="h-log">Event log</h3><span class="tag" id="log-tag">—</span></div>
+                <ol class="events" id="events" reversed><li class="muted">Waiting for the device…</li></ol>
+                <p class="panel-hint">Faults, arming, uploads, Wi-Fi and calibration; local time once the device's clock is set over the internet, else time since that boot (hover for both). The device keeps the latest 40 through crashes, watchdog resets and reboots (not a power-off), so the entries before a reset explain it.</p>
+              </section>
+    </div>
+  </div>
+  <div class="tab-panel wrap" id="tab-record" role="tabpanel" aria-labelledby="tab-btn-record" hidden>
+    <div class="tab-head"><h2 class="tab-title">Record</h2><p class="tab-sub">Log every control tick, with optional excitation, for system identification.</p></div>
+    <div class="cards">
+              <section class="card span-3" id="card-record" aria-labelledby="h-record">
+                <div class="card-head"><span class="card-label">sysid</span><h3 id="h-record">Record</h3><span class="tag" id="rec-tag">—</span></div>
+                <div class="rec-ctrl">
+                  <button class="arm-btn arm-btn-sm" data-arm type="button" aria-pressed="false" title="Arm sends the commands to the drive. Esc disarms from anywhere on the page.">
+                    <span class="arm-dot" aria-hidden="true"></span><span class="arm-label">Arm</span><span class="arm-key">esc</span>
+                  </button>
+                  <div class="mode-toggle" role="group" aria-label="Who is in control">
+                    <button class="mode-btn" type="button" data-mode="manual" aria-pressed="false">Manual</button>
+                    <button class="mode-btn" type="button" data-mode="ai" aria-pressed="false">AI</button>
+                  </div>
+                  <span class="rec-ctrl-note" id="rec-ctrl-note"></span>
+                </div>
+                <div class="preset-row" id="rec-presets" role="group" aria-label="Recording preset"></div>
+                <div class="card-split">
+                  <div style="display:flex;flex-direction:column;gap:.6rem;min-width:0">
+                    <p class="notice" id="rec-setup"></p>
+                    <p class="notice bad" id="rec-warn" hidden></p>
+                    <div class="rec-fields">
+                      <div class="field"><label for="rec-seconds">length (s)</label><input id="rec-seconds" type="number" min="1" max="600" step="1"></div>
+                      <div class="field"><label for="rec-kind">excitation</label><select id="rec-kind"><option value="none">none</option><option value="chirp">chirp</option><option value="prbs">PRBS</option><option value="steps">steps</option><option value="sine">sine</option></select></div>
+                      <div class="field" data-for="chirp prbs steps sine"><label for="rec-amp">amplitude (N)</label><input id="rec-amp" type="number" min="0" max="10" step="0.1"></div>
+                      <div class="field" data-for="chirp sine"><label for="rec-f0">f0 (Hz)</label><input id="rec-f0" type="number" min="0.01" max="50" step="0.05"></div>
+                      <div class="field" data-for="chirp"><label for="rec-f1">f1 (Hz)</label><input id="rec-f1" type="number" min="0.01" max="50" step="0.1"></div>
+                      <div class="field" data-for="prbs steps"><label for="rec-period" id="rec-period-l">bit (s)</label><input id="rec-period" type="number" min="0.005" max="10" step="0.005"></div>
+                      <div class="field" data-for="chirp prbs steps sine"><label for="rec-duration">signal (s)</label><input id="rec-duration" type="number" min="0.5" max="600" step="0.5"></div>
+                      <div class="field" data-for="prbs"><label for="rec-seed">seed</label><input id="rec-seed" type="number" min="0" max="4294967295" step="1"></div>
+                    </div>
+                    <div class="field"><label for="rec-note">note (saved in the file)</label><input id="rec-note" maxlength="63" spellcheck="false" placeholder="e.g. ring-down 1, links 2 cm off centre"></div>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:.6rem;min-width:0">
+                    <div class="meter">
+                      <div class="meter-top"><span id="rec-state">no recording yet</span><b id="rec-secs">—</b></div>
+                      <div class="progress" style="height:12px"><i id="rec-bar"></i></div>
+                    </div>
+                    <dl class="kv" id="rec-kv"><dt>samples</dt><dd>—</dd></dl>
+                    <div class="btn-row">
+                      <button class="sim-btn primary" type="button" id="rec-start">Start recording</button>
+                      <button class="sim-btn" type="button" id="rec-stop" disabled>Stop</button>
+                    </div>
+                    <div class="btn-row">
+                      <button class="sim-btn" type="button" id="rec-try" title="Run the excitation without recording, e.g. to try an amplitude">Excite only</button>
+                      <button class="sim-btn" type="button" id="rec-dl" disabled>Download .ncpr</button>
+                    </div>
+                    <p class="panel-msg" id="rec-msg" aria-live="polite"></p>
+                  </div>
+                </div>
+                <div class="rec-plot"><canvas class="sim-states" id="rec-plot" aria-label="Last 6 seconds of cart position and force (command solid, applied dashed)"></canvas></div>
+                <p class="panel-hint" id="rec-ids"></p>
+              </section>
+    </div>
+  </div>
+  <div class="tab-panel wrap" id="tab-settings" role="tabpanel" aria-labelledby="tab-btn-settings" hidden>
+    <div class="tab-head"><h2 class="tab-title">Settings</h2><p class="tab-sub">Network, firmware and model updates, and the device itself.</p></div>
+    <div class="cards">
+              <section class="card span-2" id="card-wifi" aria-labelledby="h-wifi">
+                <div class="card-head"><span class="card-label">net</span><h3 id="h-wifi">Wi-Fi</h3><span class="tag" id="wifi-tag">—</span></div>
+                <div class="card-split">
+                  <div class="col">
+                    <dl class="kv" id="wifi-kv"><dt>mode</dt><dd>—</dd></dl>
+                    <form class="form form-inline" id="host-form" autocomplete="off">
+                      <div class="field"><label for="host-name">hostname</label>
+                        <div class="input-suffix"><input id="host-name" maxlength="32" spellcheck="false" autocapitalize="off" pattern="[a-z0-9]([a-z0-9\-]{0,30}[a-z0-9])?" title="1–32 of a–z, 0–9 and -"><span>.local</span></div></div>
+                      <button class="sim-btn" type="submit" id="host-save">Rename</button>
+                    </form>
+                    <button class="sim-btn danger" type="button" id="wifi-forget" title="Erase the saved network and reboot into the setup access point">Forget network…</button>
+                    <p class="panel-msg" id="host-msg" aria-live="polite"></p>
+                  </div>
+                  <form class="form" id="wifi-form" autocomplete="off">
+                    <div class="field"><label for="wifi-ssid">network (SSID)</label><input id="wifi-ssid" name="ssid" maxlength="32" required spellcheck="false" autocapitalize="off"></div>
+                    <div class="field"><label for="wifi-pass">password</label><input id="wifi-pass" name="password" type="password" maxlength="64" autocapitalize="off"></div>
+                    <p class="panel-hint">The device tries the network first and saves it only if it joins (no reboot). In setup mode its access point <code>cartpole-XXXX</code> stays up for a moment so you can read the result. A 2.4&nbsp;GHz network is required.</p>
+                    <button class="sim-btn primary" type="submit" id="wifi-save">Join network</button>
+                    <p class="panel-msg" id="wifi-msg" aria-live="polite"></p>
+                  </form>
+                </div>
+              </section>
+              <section class="card" id="card-system" aria-labelledby="h-system">
+                <div class="card-head"><span class="card-label">chip</span><h3 id="h-system">System</h3><span class="tag" id="sys-tag">—</span></div>
+                <dl class="kv" id="sys-kv"><dt>chip</dt><dd>—</dd></dl>
+                <button class="sim-btn" type="button" id="reboot">Reboot</button>
+              </section>
+              <section class="card span-2" id="card-update" aria-labelledby="h-update">
+                <div class="card-head"><span class="card-label">ota</span><h3 id="h-update">Update</h3><span class="tag" id="ota-tag">—</span></div>
+                <div class="card-split">
+                  <div style="display:flex;flex-direction:column;gap:.7rem;min-width:0">
+                    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-describedby="dz-sub">
+                      <svg class="dz-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5"/><path d="M4 14v4.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V14"/></svg>
+                      <span class="dz-title">Drop a firmware image or a model</span>
+                      <span class="dz-sub" id="dz-sub"><code>n-cartpole-fw-&lt;ver&gt;.bin</code> or <code>.ncpm</code> · or click to choose</span>
+                      <input type="file" id="file-input" accept=".bin,.ncpm,application/octet-stream" hidden>
+                    </div>
+                    <div class="file-panel" id="file-panel" hidden></div>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:.6rem;min-width:0">
+                    <dl class="kv" id="ota-kv"><dt>running</dt><dd>—</dd></dl>
+                    <div>
+                      <div class="meter-top" style="margin-bottom:.25rem"><span>releases</span><a class="link-arrow" href="https://github.com/Tsmorz/n-cartpole/releases" target="_blank" rel="noopener">GitHub</a></div>
+                      <ul class="releases" id="releases"><li class="muted rel-hint">Firmware images (<code>n-cartpole-fw-*.bin</code>) are attached to the <code>fw-v*</code> releases.</li></ul>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <section class="card" id="card-model" aria-labelledby="h-model">
+                <div class="card-head"><span class="card-label">.ncpm</span><h3 id="h-model">Model</h3><a class="tag" id="model-dl" href="api/model" download hidden>download</a></div>
+                <dl class="kv" id="model-kv"><dt>model</dt><dd>—</dd></dl>
+                <p class="check-line" id="model-check"></p>
+              </section>
+    </div>
+  </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <p>n-cartpole firmware <span id="foot-ver"></span> · <a href="https://github.com/Tsmorz/n-cartpole" target="_blank" rel="noopener">Tsmorz/n-cartpole</a></p>
+      <p id="foot-chip"></p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

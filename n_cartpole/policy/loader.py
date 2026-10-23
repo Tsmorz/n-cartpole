@@ -115,8 +115,14 @@ def load_policy(checkpoint: str | Path, device: str = "cpu") -> PolicyBundle:
     norm.load_state_dict(ckpt["norm"])
 
     value: ValueFn | None = None
+    # The actor can be smaller than the critics (TQCConfig.actor_hidden).
+    actor_hidden = int(getattr(cfg, "actor_hidden", None) or hidden)
     tqc_actor = SquashedGaussianActor(
-        hidden=hidden, force_max=physics.force_max, obs_dim=obs_dim
+        hidden=actor_hidden,
+        force_max=physics.force_max,
+        # A distilled student may have fewer residual blocks (training/distill.py).
+        blocks=int(ckpt.get("actor_blocks", 2)),
+        obs_dim=obs_dim,
     )
     tqc_actor.load_state_dict(ckpt["actor"])
     tqc_actor.eval()
@@ -145,7 +151,7 @@ def load_policy(checkpoint: str | Path, device: str = "cpu") -> PolicyBundle:
         algo=algo,
         n_links=n_links,
         obs_dim=obs_dim,
-        hidden=hidden,
+        hidden=actor_hidden,
         physics=physics,
         norm=norm,
         select_action=select_action,
