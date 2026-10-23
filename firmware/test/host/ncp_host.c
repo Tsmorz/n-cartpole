@@ -55,7 +55,8 @@
 
 static ncp_model_t g_model;
 static ncp_policy_t g_pol;
-static float *g_weights, *g_scratch;
+static void *g_weights;
+static float *g_scratch;
 static int g_header_crc_ok;
 
 /* key=value options */
@@ -102,11 +103,15 @@ static void load_model(const char *path) {
     ncp_err_t err = ncp_blob_validate(blob, len, &h);
     if (err != NCP_OK) die(ncp_err_str(err));
     g_header_crc_ok = ncp_blob_crc(blob, len) == h.crc32;
-    size_t count = ncp_weight_count(&h);
-    g_weights = malloc(count * sizeof(float));
+    g_weights = malloc(ncp_weight_ram_bytes(&h));
     g_scratch = malloc(ncp_policy_scratch_floats(&h) * sizeof(float));
     if (!g_weights || !g_scratch) die("out of memory");
-    ncp_weights_decode(&h, blob + NCP_HEADER_SIZE, g_weights, count);
+    /* In 4 KB chunks, as model_store.c reads the partition when it cannot map it. */
+    const size_t wbytes = ncp_weight_bytes(&h);
+    for (size_t off = 0; off < wbytes; off += 4096) {
+        size_t n = wbytes - off < 4096 ? wbytes - off : 4096;
+        ncp_weights_load(&h, blob + NCP_HEADER_SIZE + off, off, n, g_weights);
+    }
     if (ncp_model_bind(&g_model, &h, g_weights) != NCP_OK) die("bind failed");
     ncp_policy_init(&g_pol, &g_model, g_scratch);
     free(blob);
@@ -176,7 +181,8 @@ static void cmd_info(void) {
            h->x_noise_std, h->angle_noise_std, h->x_resolution, h->angle_resolution);
     printf("goal_tol_angle=%.17g\ngoal_tol_vel=%.17g\nlabel=%s\n", h->goal_tol_angle,
            h->goal_tol_vel, h->label);
-    printf("weight_count=%zu\nweight_bytes=%zu\n", ncp_weight_count(h), ncp_weight_bytes(h));
+    printf("weight_count=%zu\nweight_bytes=%zu\nweight_ram_bytes=%zu\n", ncp_weight_count(h),
+           ncp_weight_bytes(h), ncp_weight_ram_bytes(h));
     double pos_std[NCP_MAX_POS];
     ncp_ekf_pos_std(h, pos_std);
     print_arr("pos_std", pos_std, n + 1);
@@ -195,9 +201,39 @@ static void cmd_info(void) {
     printf("\n");
 }
 
+static void print_fvec(const float *v, size_t n) {
+    for (size_t i = 0; i < n; i++) printf("%.9g\n", (double)v[i]);
+}
+
+/* A block matrix as float32 values (int8: q * scale, the value the policy multiplies by). */
+static void print_mat(const float *w, const int8_t *q, const float *s, size_t rows, size_t cols) {
+    if (q == NULL) {
+        print_fvec(w, rows * cols);
+        return;
+    }
+    for (size_t r = 0; r < rows; r++)
+        for (size_t c = 0; c < cols; c++) printf("%.9g\n", (double)((float)q[r * cols + c] * s[r]));
+}
+
+/* Every weight in file order (ncp_model.h), whatever the dtype. */
 static void cmd_weights(void) {
-    size_t count = ncp_weight_count(&g_model.hdr);
-    for (size_t i = 0; i < count; i++) printf("%.9g\n", (double)g_weights[i]);
+    const ncp_model_t *m = &g_model;
+    const size_t H = m->hdr.hidden, D = m->hdr.obs_dim, E = H * m->hdr.expand;
+    print_fvec(m->in_w, H * D);
+    print_fvec(m->in_b, H);
+    for (int b = 0; b < m->hdr.n_blocks; b++) {
+        const ncp_block_t *k = &m->blocks[b];
+        print_fvec(k->ln_w, H);
+        print_fvec(k->ln_b, H);
+        print_mat(k->fc1_w, k->fc1_q, k->fc1_s, E, H);
+        print_fvec(k->fc1_b, E);
+        print_mat(k->fc2_w, k->fc2_q, k->fc2_s, H, E);
+        print_fvec(k->fc2_b, H);
+    }
+    print_fvec(m->final_ln_w, H);
+    print_fvec(m->final_ln_b, H);
+    print_fvec(m->out_w, H);
+    print_fvec(m->out_b, 1);
 }
 
 static void cmd_policy(void) {

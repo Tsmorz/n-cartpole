@@ -146,14 +146,65 @@ def weight_count(h: dict[str, Any]) -> int:
     return H * D + H + h["n_blocks"] * block + 2 * H + H + 1
 
 
+DTYPE_NAMES = {0: "f32", 1: "f16", 2: "i8"}
+
+
+def _tensor_shapes(h: dict[str, Any]) -> list[tuple[bool, tuple[int, ...]]]:
+    """(int8 in an i8 blob?, shape) of each tensor in file order (ncp_model.h)."""
+    H, D = h["hidden"], h["obs_dim"]
+    E = H * h["expand"]
+    block = [(False, (H,)), (False, (H,)), (True, (E, H)), (False, (E,))]
+    block += [(True, (H, E)), (False, (H,))]
+    return (
+        [(False, (H, D)), (False, (H,))]
+        + block * h["n_blocks"]
+        + [(False, (H,)), (False, (H,)), (False, (H,)), (False, (1,))]
+    )
+
+
+def weight_bytes(h: dict[str, Any]) -> int:
+    """Bytes of the weights in the file (ncp_weight_bytes)."""
+    if h["dtype"] != 2:
+        return weight_count(h) * (4 if h["dtype"] == 0 else 2)
+    total = 0
+    for quant, shape in _tensor_shapes(h):
+        n = int(np.prod(shape))
+        total += 4 * shape[0] + (n + 3) // 4 * 4 if quant else 4 * n
+    return total
+
+
+def weight_ram_bytes(h: dict[str, Any]) -> int:
+    """Bytes the device holds the weights in (ncp_weight_ram_bytes)."""
+    return weight_bytes(h) if h["dtype"] == 2 else 4 * weight_count(h)
+
+
+def decode_weights(blob: bytes, h: dict[str, Any]) -> np.ndarray:
+    """Every weight as float32 in file order (int8: q * row scale)."""
+    if h["dtype"] != 2:
+        dt = np.dtype("<f4") if h["dtype"] == 0 else np.dtype("<f2")
+        return np.frombuffer(blob, dtype=dt, offset=HEADER.size).astype(np.float32)
+    out, off = [], HEADER.size
+    for quant, shape in _tensor_shapes(h):
+        n = int(np.prod(shape))
+        if quant:
+            scale = np.frombuffer(blob, "<f4", shape[0], off)
+            q = np.frombuffer(blob, np.int8, n, off + 4 * shape[0]).reshape(shape)
+            out.append((q.astype(np.float32) * scale[:, None]).ravel())
+            off += 4 * shape[0] + (n + 3) // 4 * 4
+        else:
+            out.append(np.frombuffer(blob, "<f4", n, off).astype(np.float32))
+            off += 4 * n
+    return np.concatenate(out)
+
+
 def validate_blob(blob: bytes) -> dict[str, Any]:
     """Header, size and CRC checks of ncp_blob_validate; returns the header."""
     h = parse_header(blob)
     if h["version"] != 1 or h["header_size"] != HEADER.size:
         raise ValueError(f"unsupported blob version {h['version']}")
-    if not 1 <= h["n_links"] <= MAX_LINKS or h["dtype"] not in (0, 1):
+    if not 1 <= h["n_links"] <= MAX_LINKS or h["dtype"] not in DTYPE_NAMES:
         raise ValueError("dims out of range")
-    want = HEADER.size + weight_count(h) * (4 if h["dtype"] == 0 else 2)
+    want = HEADER.size + weight_bytes(h)
     if h["total_size"] != len(blob) or want != len(blob):
         raise ValueError(
             f"size mismatch: file {len(blob)}, header {h['total_size']}, dims {want}"
@@ -179,8 +230,8 @@ def model_info(h: dict[str, Any]) -> dict[str, Any]:
         "params": weight_count(h),
         "bytes": nbytes,
         "crc32": f"{h['crc32']:08x}",
-        "dtype": "f16" if h["dtype"] else "f32",
-        "weights_in": "psram" if nbytes > 256 * 1024 else "internal",
+        "dtype": DTYPE_NAMES[h["dtype"]],
+        "weights_in": "psram" if weight_ram_bytes(h) > 256 * 1024 else "internal",
         "goal_conditioned": bool(h["flags"] & FLAG_GOAL),
         "action_mode": "delta" if h["flags"] & FLAG_DELTA else "absolute",
         "estimator": "ekf" if h["flags"] & FLAG_EKF else "diff",
@@ -196,8 +247,7 @@ def model_info(h: dict[str, Any]) -> dict[str, Any]:
 
 def blob_policy(blob: bytes, h: dict[str, Any]) -> Callable[[np.ndarray], float]:
     """NumPy port of ncp_policy_act: the blob's deterministic actor, in newtons."""
-    dt = np.dtype("<f4") if h["dtype"] == 0 else np.dtype("<f2")
-    w = np.frombuffer(blob, dtype=dt, offset=HEADER.size).astype(np.float32)
+    w = decode_weights(blob, h)
     H, D, E = h["hidden"], h["obs_dim"], h["hidden"] * h["expand"]
     pos = 0
 
@@ -1126,6 +1176,8 @@ class Device:
                 "internal_free": int(182000 + j(800)),
                 "internal_min": 151320,
                 "psram_free": int(8 * 1024 * 1024 - 210_000 - model_bytes),
+                "internal_largest": 110592,
+                "alloc_failed": 0,
             },
             "wifi": dict(self.wifi),
             "uptime_s": int(time.monotonic() - self.boot),

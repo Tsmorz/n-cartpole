@@ -1,7 +1,7 @@
 """CLI: export a TQC checkpoint as an ``.ncpm`` model blob for the ESP32-S3 firmware.
 
-The blob (``n_cartpole.deploy.firmware_blob``) carries the actor weights (float32
-or float16, ``RunningNorm`` folded in), the nominal physics, the actuator limits,
+The blob (``n_cartpole.deploy.firmware_blob``) carries the actor weights (float32,
+float16 or int8 block matrices, ``RunningNorm`` folded in), the nominal physics, the actuator limits,
 the sensor/EKF model and the observation layout. Drop it on the device dashboard
 or flash it to the ``model`` partition. Also prints the network's size and a
 rough ESP32-S3 inference-time estimate against the checkpoint's control period.
@@ -47,9 +47,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dtype",
-        choices=("f32", "f16"),
+        choices=("f32", "f16", "i8"),
         default="f32",
-        help="Weight storage in the file (the device decodes to float32)",
+        help="Weight storage in the file: f32/f16 are decoded to float32 on the device; "
+        "i8 (int8 block matrices, a scale per row) stays int8, ~1/4 of the RAM",
     )
     parser.add_argument(
         "--label", type=str, default=None, help="Display name (max 63 bytes)"
@@ -80,7 +81,7 @@ def main() -> None:
     )
     where = "internal SRAM" if cost.fits_internal else "PSRAM"
     logger.info(
-        f"ESP32-S3: float32 weights {cost.weight_bytes_f32 / 1024:.0f} KB -> {where} "
+        f"ESP32-S3: {args.dtype} weights {cost.weight_ram_bytes / 1024:.0f} KB in RAM -> {where} "
         f"(~{INTERNAL_WEIGHT_BUDGET // 1024} KB usable internally next to Wi-Fi); "
         f"estimated inference {cost.est_us / 1e3:.2f} ms at {CPU_HZ / 1e6:.0f} MHz "
         f"= {100 * cost.budget_fraction:.0f}% of the {cost.dt_us / 1e3:.1f} ms period"

@@ -14,9 +14,9 @@ static const char *TAG = "model";
 
 #define MODEL_SUBTYPE ((esp_partition_subtype_t)0x40)
 /* Internal RAM to leave free after the weights, for what is allocated after the model loads
- * (Wi-Fi/lwIP/httpd/task stacks). Measured with the sdkconfig.defaults RAM budget: ~39 KB are
- * still free after boot with the weights inside (min ~24 KB under load). A model that does not
- * fit with this margin falls back to PSRAM, which is ~4x slower per tick. */
+ * (Wi-Fi/lwIP/httpd/task stacks). Measured with the sdkconfig.defaults RAM budget and the 150 KB
+ * h48x2 f32 weights inside: ~74 KB free after boot (min ~57 KB); int8 weights (44 KB): ~180 KB.
+ * A model that does not fit with this margin falls back to PSRAM, which is ~3x slower per tick. */
 #define INTERNAL_SPARE (32 * 1024)
 #define CHUNK 4096                  /* fallback read size (multiple of 4) */
 #define ERASE_BLOCK (64 * 1024)
@@ -95,7 +95,7 @@ void model_store_unload(void) {
 }
 
 /* Chunked CRC + decode from the partition, when the blob cannot be mapped. */
-static ncp_err_t read_and_decode(const ncp_header_t *h, float *dst) {
+static ncp_err_t read_and_decode(const ncp_header_t *h, void *dst) {
     uint8_t *buf = heap_caps_malloc(CHUNK, CAPS_INTERNAL);
     if (buf == NULL) {
         return NCP_E_SIZE;
@@ -105,8 +105,7 @@ static ncp_err_t read_and_decode(const ncp_header_t *h, float *dst) {
     uint32_t crc = ncp_crc32(0, &hz, sizeof(hz));
     const size_t total = h->total_size;
     const size_t wbytes = ncp_weight_bytes(h);
-    const size_t elem = h->dtype == NCP_DTYPE_F16 ? 2 : 4;
-    size_t off = NCP_HEADER_SIZE, decoded = 0;
+    size_t off = NCP_HEADER_SIZE;
     ncp_err_t err = NCP_OK;
     while (off < total) {
         size_t n = total - off < CHUNK ? total - off : CHUNK;
@@ -118,8 +117,7 @@ static ncp_err_t read_and_decode(const ncp_header_t *h, float *dst) {
         size_t woff = off - NCP_HEADER_SIZE; /* weight bytes before this chunk */
         if (woff < wbytes) {
             size_t take = wbytes - woff < n ? wbytes - woff : n;
-            ncp_weights_decode(h, buf, dst + decoded, take / elem);
-            decoded += take / elem;
+            ncp_weights_load(h, buf, woff, take, dst);
         }
         off += n;
     }
@@ -176,7 +174,7 @@ const model_t *model_store_load(void) {
 
     model_t *m = calloc(1, sizeof(*m));
     const size_t n = ncp_weight_count(&h);
-    const size_t bytes = n * sizeof(float);
+    const size_t bytes = ncp_weight_ram_bytes(&h); /* f32/f16: decoded floats; int8: as stored */
     const size_t scratch_bytes = ncp_policy_scratch_floats(&h) * sizeof(float);
     if (m == NULL) {
         goto oom;
@@ -217,7 +215,8 @@ const model_t *model_store_load(void) {
     }
 
     if (mapped) {
-        ncp_weights_decode(&h, (const uint8_t *)map + NCP_HEADER_SIZE, m->weights, n);
+        ncp_weights_load(&h, (const uint8_t *)map + NCP_HEADER_SIZE, 0, ncp_weight_bytes(&h),
+                         m->weights);
     } else {
         perr = read_and_decode(&h, m->weights);
         if (perr != NCP_OK) {
@@ -248,7 +247,7 @@ const model_t *model_store_load(void) {
     s_err[0] = '\0';
     ESP_LOGI(TAG, "loaded '%s': %u links, hidden %u x %u blocks, %lu params (%s) in %s",
              m->hdr.label, (unsigned)h.n_links, (unsigned)h.hidden, (unsigned)h.n_blocks,
-             (unsigned long)n, h.dtype == NCP_DTYPE_F16 ? "f16" : "f32",
+             (unsigned long)n, ncp_dtype_name(h.dtype),
              m->in_psram ? "PSRAM" : "internal RAM");
     return s_cur;
 

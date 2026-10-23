@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
 #include "hal.h"
+#include "heap_watch.h"
 #include "model_store.h"
 #include "net.h"
 #include "record.h"
@@ -253,6 +254,7 @@ static void build_status(const ctrl_status_t *st, const model_strs_t *ms) {
     cJSON_AddNumberToObject(heap, "internal_min",
                             (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     cJSON_AddNumberToObject(heap, "psram_free", (double)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    heap_watch_json(heap);
 
     net_info_t ni;
     net_get_info(&ni);
@@ -392,8 +394,11 @@ static void watch(const ctrl_status_t *st, const model_strs_t *ms) {
 static void tlm_task(void *arg) {
     (void)arg;
     const size_t msg_size = sizeof(ncp_tlm_msg_hdr_t) + FRAMES_PER_MSG * sizeof(ncp_tlm_frame_t);
-    uint8_t *msg = heap_caps_malloc(msg_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    char *text = heap_caps_malloc(STATUS_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* PSRAM: only this task touches them, a few times a second (internal RAM is for the weights). */
+    uint8_t *msg = heap_caps_malloc_prefer(msg_size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    char *text = heap_caps_malloc_prefer(STATUS_SIZE, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     configASSERT(msg != NULL && text != NULL);
     ncp_tlm_frame_t *frames = (ncp_tlm_frame_t *)(msg + sizeof(ncp_tlm_msg_hdr_t));
 
@@ -427,6 +432,7 @@ static void tlm_task(void *arg) {
             model_strings(&st, &ms);
             watch(&st, &ms);
             build_status(&st, &ms);
+            heap_watch_poll();
             if (web_ws_clients() > 0) {
                 size_t len = tlm_status_json(text, STATUS_SIZE);
                 if (len > 0) {
@@ -439,7 +445,8 @@ static void tlm_task(void *arg) {
 }
 
 esp_err_t tlm_start(void) {
-    s_status = heap_caps_calloc(1, STATUS_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_status = heap_caps_calloc_prefer(1, STATUS_SIZE, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_status_lock = xSemaphoreCreateMutex();
     if (s_status == NULL || s_status_lock == NULL) {
         return ESP_ERR_NO_MEM;

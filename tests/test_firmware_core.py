@@ -19,8 +19,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from n_cartpole.deploy import firmware_blob as fb
+from n_cartpole.deploy.actor_export import actor_tensors
+from n_cartpole.deploy.quantize import actor_forward, quantize_tensors
 from n_cartpole.env.cartpole import NPendulumCartpole
 from n_cartpole.env.dynamics import PhysicsParams, _model, _ode, available_force, step
 from n_cartpole.env.estimator import StateEKF
@@ -108,6 +111,14 @@ def blob16(ckpt: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Export the f16 .ncpm blob."""
     path = tmp_path_factory.mktemp("blob16") / "model16.ncpm"
     path.write_bytes(fb.export_blob(ckpt, dtype="f16"))
+    return path
+
+
+@pytest.fixture(scope="module")
+def blob8(ckpt: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Export the int8 .ncpm blob."""
+    path = tmp_path_factory.mktemp("blob8") / "model8.ncpm"
+    path.write_bytes(fb.export_blob(ckpt, dtype="i8"))
     return path
 
 
@@ -201,6 +212,58 @@ def test_f16_weights_decode_exactly(host: Path, blob16: Path, blob: Path) -> Non
     f32 = _floats(_run(host, blob, "policy", stdin=obs))[:, 0]
     f16 = _floats(_run(host, blob16, "policy", stdin=obs))[:, 0]
     np.testing.assert_allclose(f16, f32, atol=0.05)
+
+
+def _info(host: Path, blob: Path) -> dict[str, str]:
+    return {
+        r[0].split("=", 1)[0]: r[0].split("=", 1)[1] for r in _run(host, blob, "info")
+    }
+
+
+def test_i8_weights_and_policy_match_python(
+    host: Path, blob8: Path, blob: Path, ckpt: Path
+) -> None:
+    """C reads the int8 image like Python and runs the same network as actor_forward."""
+    info = _info(host, blob8)
+    h = fb.read_header(blob8.read_bytes())
+    assert int(info["weight_bytes"]) == fb.weight_bytes(h)
+    assert int(info["weight_ram_bytes"]) == fb.weight_ram_bytes(h)
+    assert int(info["weight_count"]) == fb.weight_count(h)
+    c8 = _floats(_run(host, blob8, "weights"))[:, 0].astype(np.float32)
+    np.testing.assert_array_equal(c8, fb.read_weights(blob8.read_bytes()))
+    rng = np.random.default_rng(4)
+    obs = rng.normal(size=(200, h["obs_dim"])).astype(np.float32)
+    obs[:50] *= 4.0
+    out = _floats(_run(host, blob8, "policy", stdin=_fmt(obs)))[:, 0]
+    t = quantize_tensors(
+        actor_tensors(torch.load(ckpt, map_location="cpu", weights_only=False))
+    )
+    np.testing.assert_allclose(out, actor_forward(t, obs, h["force_max"]), atol=2e-4)
+    f32 = _floats(_run(host, blob, "policy", stdin=_fmt(obs)))[:, 0]
+    assert np.mean(np.abs(out - f32)) < 0.02 * h["force_max"]
+
+
+def test_i8_odd_sizes_are_padded(host: Path, blob: Path, tmp_path: Path) -> None:
+    """Rows x cols not a multiple of 4: the zero padding keeps every tensor aligned."""
+    h = fb.read_header(blob.read_bytes())
+    h.update(hidden=5, expand=3, n_blocks=2, dtype=fb.DTYPE_I8)
+    rng = np.random.default_rng(5)
+    tensors = [(n, rng.normal(size=s)) for n, s in fb.tensor_shapes(h)]
+    payload = fb._payload(tensors, "i8")
+    assert len(payload) == fb.weight_bytes(h) and len(payload) % 4 == 0
+    h["total_size"] = 512 + len(payload)
+    data = bytearray(fb.pack_header(h) + payload)
+    data[fb.CRC_OFFSET : fb.CRC_OFFSET + 4] = fb.blob_crc(bytes(data)).to_bytes(
+        4, "little"
+    )
+    path = tmp_path / "odd.ncpm"
+    path.write_bytes(bytes(data))
+    c = _floats(_run(host, path, "weights"))[:, 0].astype(np.float32)
+    np.testing.assert_array_equal(c, fb.read_weights(bytes(data)))
+    obs = rng.normal(size=(30, h["obs_dim"])).astype(np.float32)
+    out = _floats(_run(host, path, "policy", stdin=_fmt(obs)))[:, 0]
+    ref = actor_forward(quantize_tensors(tensors), obs, h["force_max"])
+    np.testing.assert_allclose(out, ref, atol=2e-4)
 
 
 # --- policy -----------------------------------------------------------------------

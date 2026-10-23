@@ -6,7 +6,7 @@
 
    - The telemetry layout is ncp_telemetry.h (232-byte packed little-endian
      frames behind a 4-byte header); TLM below decodes those exact offsets.
-   - The model blob is ncp_model.h (.ncpm: 512-byte header, then float32/float16
+   - The model blob is ncp_model.h (.ncpm: 512-byte header, then float32/float16/int8
      weights in forward order with the RunningNorm folded in). The page fetches
      /api/model and runs the same network on every streamed observation to draw
      its activations. The forward pass, scene, plots, goal pictograms and network
@@ -81,14 +81,50 @@
     if (h.version !== 1) throw new Error('blob version ' + h.version + ' (this page reads 1)');
     if (h.n_links < 1 || h.n_links > MAX_LINKS || !h.hidden || !h.obs_dim || h.n_blocks > 4) throw new Error('dims out of range');
     h.goal = !!(h.flags & NCP.GOAL); h.delta = !!(h.flags & NCP.DELTA); h.ekf = !!(h.flags & NCP.EKF);
+    if (!DTYPES[h.dtype]) throw new Error('weight dtype ' + h.dtype + ' (this page reads f32, f16, i8)');
+    h.dtype_name = DTYPES[h.dtype];
     h.params = weightCount(h);
-    h.expected_size = NCP.HEADER + h.params * (h.dtype ? 2 : 4);
+    h.expected_size = NCP.HEADER + weightBytes(h);
     return h;
   }
 
+  var DTYPES = { 0: 'f32', 1: 'f16', 2: 'i8' };
   function weightCount(h) {
     var H = h.hidden, E = H * h.expand, D = h.obs_dim;
     return H * D + H + h.n_blocks * (2 * H + E * H + E + H * E + H) + 2 * H + H + 1;
+  }
+  // [int8 in an i8 blob?, rows, cols] per tensor in file order (ncp_model.h).
+  function tensorShapes(h) {
+    var H = h.hidden, E = H * h.expand, D = h.obs_dim, out = [[false, H, D], [false, H, 1]];
+    for (var b = 0; b < h.n_blocks; b++) {
+      out.push([false, H, 1], [false, H, 1], [true, E, H], [false, E, 1], [true, H, E], [false, H, 1]);
+    }
+    out.push([false, H, 1], [false, H, 1], [false, 1, H], [false, 1, 1]);
+    return out;
+  }
+  function weightBytes(h) {   // ncp_weight_bytes
+    if (h.dtype !== 2) return h.params * (h.dtype ? 2 : 4);
+    return tensorShapes(h).reduce(function (a, t) {
+      var n = t[1] * t[2];
+      return a + (t[0] ? 4 * t[1] + Math.ceil(n / 4) * 4 : 4 * n);
+    }, 0);
+  }
+  // An i8 blob's weights as float32 in file order: q · scale of its row.
+  function int8ToFloat(h, buffer) {
+    var out = new Float32Array(h.params), pos = 0, off = NCP.HEADER;
+    tensorShapes(h).forEach(function (t) {
+      var rows = t[1], cols = t[2], n = rows * cols;
+      if (!t[0]) {
+        out.set(new Float32Array(buffer.slice(off, off + 4 * n)), pos);
+        off += 4 * n;
+      } else {
+        var s = new Float32Array(buffer.slice(off, off + 4 * rows)), q = new Int8Array(buffer, off + 4 * rows, n);
+        for (var r = 0; r < rows; r++) for (var c = 0; c < cols; c++) out[pos + r * cols + c] = q[r * cols + c] * s[r];
+        off += 4 * rows + Math.ceil(n / 4) * 4;
+      }
+      pos += n;
+    });
+    return out;
   }
 
   var CRC_TABLE = null;
@@ -127,6 +163,8 @@
     var count = h.params, all;
     if (h.dtype === 0) {
       all = new Float32Array(buffer.slice(NCP.HEADER, NCP.HEADER + 4 * count));
+    } else if (h.dtype === 2) {
+      all = int8ToFloat(h, buffer);
     } else {
       all = halfToFloat(buffer, NCP.HEADER, count);
     }
@@ -715,7 +753,7 @@
         }));
     } else {
       m = m || {};
-      var G = geom(), dtype = m.dtype || (h ? (h.dtype ? 'f16' : 'f32') : null);
+      var G = geom(), dtype = m.dtype || (h ? h.dtype_name : null);
       var goals = m.goals || (h && h.goal ? goalLabels() : null);
       kv('model-kv', [
         ['label', m.label || (h && h.label), 'accent'],
@@ -758,7 +796,7 @@
       if (st === 'none') e.insertAdjacentHTML('beforeend', ' · ' + goto('settings:dropzone', 'upload one →'));
       return;
     }
-    var parts = [h.hidden + ' × ' + h.n_blocks + ' blocks', (h.params / 1e6).toFixed(2) + ' M params', h.dtype ? 'f16' : 'f32'];
+    var parts = [h.hidden + ' × ' + h.n_blocks + ' blocks', (h.params / 1e6).toFixed(2) + ' M params', h.dtype_name];
     if (S.netMs) parts.push('forward ' + S.netMs.toFixed(1) + ' ms');
     var html = esc(parts.join(' · '));
     if (S.parity != null) html += ' · <span class="' + (S.parity < 0.05 ? 'ok' : '') + '" title="Mean |command the browser predicts − command the device sent|">browser vs device |ΔF| ' + S.parity.toFixed(3) + ' N</span>';
@@ -887,6 +925,8 @@
       { head: 'memory' },
       ['internal free', hp.internal_free != null ? bytes(hp.internal_free) : null, '', 'heap_caps_get_free_size(MALLOC_CAP_INTERNAL)'],
       ['lowest since boot', hp.internal_min != null ? bytes(hp.internal_min) : null, hp.internal_min != null && hp.internal_min < 16384 ? 'bad' : '', 'Below ~16 KB, Wi-Fi and HTTP allocations start to fail'],
+      ['largest free block', hp.internal_largest != null ? bytes(hp.internal_largest) : null, '', 'heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL): the biggest single internal allocation that can still succeed'],
+      ['failed allocations', hp.alloc_failed != null ? String(hp.alloc_failed) : null, hp.alloc_failed ? 'bad' : '', 'Since boot, any heap; the event log says which and when'],
       ['psram free', hp.psram_free != null ? bytes(hp.psram_free) : null],
       { head: 'link' },
       ['wi-fi', w.mode === 'ap' ? 'access point (setup)' : w.rssi != null ? w.rssi + ' dBm' + (w.ssid ? ' · ' + w.ssid : '') : null, w.mode === 'ap' ? 'accent' : w.rssi != null && w.rssi < -75 ? 'bad' : ''],
@@ -1814,7 +1854,7 @@
         ['links', h.n_links + (h.goal ? ' · goal-conditioned' : '')],
         ['network', h.hidden + ' × ' + h.n_blocks + ' blocks · ×' + h.expand + ' · ' + (h.params / 1e6).toFixed(2) + ' M params'],
         ['inputs', h.obs_dim + (h.action_history ? ' (' + h.action_history + ' past cmds)' : '')],
-        ['weights', bytes(u8.length) + ' · ' + (h.dtype ? 'f16' : 'f32')],
+        ['weights', bytes(u8.length) + ' · ' + h.dtype_name],
         ['action', (h.delta ? 'delta' : 'absolute') + ' · ' + (h.ekf ? 'EKF' : 'differenced') + ' · delay ' + h.delay_steps],
         ['rate', Math.round(1 / dt) + ' Hz (' + period + ' µs period)'],
         ['limits', '±' + num(h.force_max, 2) + ' N · ' + num(h.force_slew, 0) + ' N/s · rail ±' + num(h.x_lim, 2) + ' m'],

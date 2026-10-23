@@ -26,7 +26,8 @@ task policy-map -- --checkpoint checkpoints/double/tqc/tqc_latest.pt  # input→
 task export-web                                 # swing-up actor → ../personal-site/assets/models/ (browser demo; see below)
 task distill -- --hidden 64 --blocks 2          # imitate a big policy with a small actor (DAgger) → <run>-h64b2/student.pt
 task train -- --resume <teacher latest> --actor-from <student.pt> --resume-lr 1e-4 --steps N   # RL fine-tune the student vs the teacher's critics
-task export-firmware -- --checkpoint <ckpt>     # actor + physics + sensor model → dist/firmware/*.ncpm (ESP32 model blob)
+task export-firmware -- --checkpoint <ckpt>     # actor + physics + sensor model → dist/firmware/*.ncpm (ESP32 model blob; --dtype i8 = int8 block matrices, ~1/4 the RAM)
+uv run python scripts/eval_quantized.py --checkpoint <ckpt> --weights i8   # transition test with the weights as the device runs them (torch | f32 | i8)
 task fw-mock                                    # the device dashboard against a simulated device (http://127.0.0.1:8080)
 task fw-build / fw-flash -- <port> / fw-release -- fw-v0.1.0   # firmware: local Docker build / USB flash / tag → CI release
 task fw-build-rig                               # the rig backend (sdkconfig.rig) → firmware/build-rig/ (CI compiles it on every firmware push)

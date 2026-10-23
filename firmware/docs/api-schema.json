@@ -54,7 +54,7 @@
                            "action_history", "delay_steps", "dt", "force_max", "force_slew", "x_lim", "goals"],
               "properties": {
                 "label": {"type": "string"}, "crc32": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
-                "dtype": {"enum": ["f32", "f16"]}, "weights_in": {"enum": ["psram", "internal"]},
+                "dtype": {"enum": ["f32", "f16", "i8"]}, "weights_in": {"enum": ["psram", "internal"]},
                 "action_mode": {"enum": ["delta", "absolute"]}, "estimator": {"enum": ["ekf", "diff"]},
                 "goal_conditioned": {"type": "boolean"},
                 "goals": {"type": "array", "items": {"type": "string", "pattern": "^[UD]{1,4}$"}},
@@ -101,7 +101,8 @@
         "heap": {
           "type": "object",
           "required": ["internal_free", "internal_min", "psram_free"],
-          "properties": {"internal_free": {"$ref": "#/$defs/u32"}, "internal_min": {"$ref": "#/$defs/u32"}, "psram_free": {"$ref": "#/$defs/u32"}}
+          "properties": {"internal_free": {"$ref": "#/$defs/u32"}, "internal_min": {"$ref": "#/$defs/u32"}, "psram_free": {"$ref": "#/$defs/u32"},
+                         "internal_largest": {"$ref": "#/$defs/u32"}, "alloc_failed": {"$ref": "#/$defs/u32"}}
         },
         "wifi": {
           "type": "object",

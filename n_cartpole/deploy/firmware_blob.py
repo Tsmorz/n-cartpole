@@ -3,10 +3,12 @@
 The byte layout is ``ncp_header_t`` in
 ``firmware/components/cartpole_core/include/ncp_model.h``: a 512-byte little-endian
 header (dims, flags, actuator limits, nominal physics, sensor/EKF parameters,
-label) followed by the actor weights as float32 or float16, in the order of
-:func:`n_cartpole.deploy.actor_export.actor_tensors` (``RunningNorm`` folded into
-``in_w``/``in_b``, only the mean row of the output head). ``crc32`` is
-``zlib.crc32`` of the whole file with the crc field read as zero.
+label) followed by the actor weights as float32, float16 or int8, in the order
+of :func:`n_cartpole.deploy.actor_export.actor_tensors` (``RunningNorm`` folded
+into ``in_w``/``in_b``, only the mean row of the output head). int8 quantizes only
+the block matrices (:mod:`n_cartpole.deploy.quantize`): each is stored as its
+float32 row scales, the int8 rows, then zero bytes up to a multiple of 4. ``crc32``
+is ``zlib.crc32`` of the whole file with the crc field read as zero.
 
 The firmware reproduces the training env's observation pipeline exactly, so only
 configurations it implements are exported: no observation history, no sysID
@@ -26,6 +28,7 @@ import torch
 from loguru import logger
 
 from n_cartpole.deploy.actor_export import actor_tensors, n_blocks
+from n_cartpole.deploy.quantize import dequantize, is_quantized, quantize_rows
 from n_cartpole.policy.loader import load_policy
 
 MAGIC = b"NCPM"
@@ -39,7 +42,9 @@ LABEL_BYTES = 64
 
 DTYPE_F32 = 0
 DTYPE_F16 = 1
-DTYPES = {"f32": DTYPE_F32, "f16": DTYPE_F16}
+DTYPE_I8 = 2
+DTYPES = {"f32": DTYPE_F32, "f16": DTYPE_F16, "i8": DTYPE_I8}
+DTYPE_NAMES = {v: k for k, v in DTYPES.items()}
 
 FLAG_GOAL = 1 << 0
 FLAG_DELTA = 1 << 1
@@ -146,6 +151,71 @@ def weight_count(h: dict[str, Any]) -> int:
     return H * D + H + int(h["n_blocks"]) * (2 * H + 2 * E * H + E + H) + 3 * H + 1
 
 
+def _pad4(n: int) -> int:
+    return (n + 3) & ~3
+
+
+def tensor_shapes(h: dict[str, Any]) -> list[tuple[str, tuple[int, ...]]]:
+    """Name and shape of every weight tensor, in file order (:func:`actor_tensors`)."""
+    H, D, E = int(h["hidden"]), int(h["obs_dim"]), int(h["hidden"]) * int(h["expand"])
+    shapes: list[tuple[str, tuple[int, ...]]] = [("in_w", (H, D)), ("in_b", (H,))]
+    for i in range(int(h["n_blocks"])):
+        shapes += [
+            (f"b{i}_ln_w", (H,)),
+            (f"b{i}_ln_b", (H,)),
+            (f"b{i}_fc1_w", (E, H)),
+            (f"b{i}_fc1_b", (E,)),
+            (f"b{i}_fc2_w", (H, E)),
+            (f"b{i}_fc2_b", (H,)),
+        ]
+    shapes += [
+        ("final_ln_w", (H,)),
+        ("final_ln_b", (H,)),
+        ("out_w", (1, H)),
+        ("out_b", (1,)),
+    ]
+    return shapes
+
+
+def weight_bytes(h: dict[str, Any]) -> int:
+    """Bytes of the weights in the file for the header's dtype (ncp_weight_bytes)."""
+    if h["dtype"] == DTYPE_I8:
+        total = 0
+        for name, shape in tensor_shapes(h):
+            n = int(np.prod(shape))
+            total += 4 * shape[0] + _pad4(n) if is_quantized(name) else 4 * n
+        return total
+    return weight_count(h) * (2 if h["dtype"] == DTYPE_F16 else 4)
+
+
+def weight_ram_bytes(h: dict[str, Any]) -> int:
+    """Bytes the device holds the weights in (ncp_weight_ram_bytes): f32/f16 decode to float32."""
+    return weight_bytes(h) if h["dtype"] == DTYPE_I8 else weight_count(h) * 4
+
+
+def _payload(tensors: list[tuple[str, np.ndarray]], dtype: str) -> bytes:
+    """Return the weights section of a blob."""
+    if dtype != "i8":
+        np_dtype = "<f2" if dtype == "f16" else "<f4"
+        return b"".join(
+            np.ascontiguousarray(arr.ravel(), dtype=np_dtype).tobytes()
+            for _, arr in tensors
+        )
+    parts: list[bytes] = []
+    for name, arr in tensors:
+        if is_quantized(name):
+            q, scale = quantize_rows(arr)
+            raw = q.tobytes()
+            parts += [
+                scale.astype("<f4").tobytes(),
+                raw,
+                b"\0" * (_pad4(len(raw)) - len(raw)),
+            ]
+        else:
+            parts.append(np.ascontiguousarray(arr.ravel(), dtype="<f4").tobytes())
+    return b"".join(parts)
+
+
 def blob_crc(blob: bytes) -> int:
     """CRC-32 of a blob with its crc32 field read as zero (ncp_blob_crc)."""
     zeroed = blob[:CRC_OFFSET] + b"\0\0\0\0" + blob[CRC_OFFSET + 4 :]
@@ -166,8 +236,9 @@ def read_header(blob: bytes) -> dict[str, Any]:
         raise ValueError(
             f"unsupported blob version {h['version']} / header size {h['header_size']}"
         )
-    width = 2 if h["dtype"] == DTYPE_F16 else 4
-    expected = HEADER_SIZE + weight_count(h) * width
+    if h["dtype"] not in DTYPE_NAMES:
+        raise ValueError(f"unsupported weight dtype {h['dtype']}")
+    expected = HEADER_SIZE + weight_bytes(h)
     if h["total_size"] != expected or len(blob) != expected:
         raise ValueError(
             f"blob size {len(blob)} disagrees with its header "
@@ -179,10 +250,28 @@ def read_header(blob: bytes) -> dict[str, Any]:
 
 
 def read_weights(blob: bytes) -> np.ndarray:
-    """Return the blob's weights as float32 (after verifying the header)."""
+    """Return the blob's weights as float32 in file order (after verifying the header).
+
+    int8 matrices come back dequantized (``q * scale``), the values the device multiplies by.
+    """
     h = read_header(blob)
-    dt = "<f2" if h["dtype"] == DTYPE_F16 else "<f4"
-    return np.frombuffer(blob, dtype=dt, offset=HEADER_SIZE).astype(np.float32)
+    if h["dtype"] != DTYPE_I8:
+        dt = "<f2" if h["dtype"] == DTYPE_F16 else "<f4"
+        return np.frombuffer(blob, dtype=dt, offset=HEADER_SIZE).astype(np.float32)
+    out: list[np.ndarray] = []
+    off = HEADER_SIZE
+    for name, shape in tensor_shapes(h):
+        n = int(np.prod(shape))
+        if is_quantized(name):
+            rows = shape[0]
+            scale = np.frombuffer(blob, "<f4", rows, off)
+            q = np.frombuffer(blob, np.int8, n, off + 4 * rows).reshape(shape)
+            out.append(dequantize(q, scale).ravel())
+            off += 4 * rows + _pad4(n)
+        else:
+            out.append(np.frombuffer(blob, "<f4", n, off).astype(np.float32))
+            off += 4 * n
+    return np.concatenate(out)
 
 
 def _check_supported(cfg: Any, n: int, blocks: int) -> None:
@@ -252,7 +341,8 @@ def export_blob(
 
     Args:
         checkpoint: path to a ``tqc_*.pt`` checkpoint.
-        dtype: ``"f32"`` or ``"f16"`` weights.
+        dtype: ``"f32"``, ``"f16"`` or ``"i8"`` weights (int8: the block matrices only,
+            :mod:`n_cartpole.deploy.quantize`).
         label: display name; default ``<checkpoint dir name>@<step>``.
 
     Raises:
@@ -286,11 +376,7 @@ def export_blob(
     if label is None:
         label = default_label(checkpoint, step)
 
-    np_dtype = "<f2" if dtype == "f16" else "<f4"
-    payload = b"".join(
-        np.ascontiguousarray(arr.ravel(), dtype=np_dtype).tobytes()
-        for _, arr in tensors
-    )
+    payload = _payload(tensors, dtype)
     fields: dict[str, Any] = {
         "magic": MAGIC,
         "version": VERSION,
@@ -335,7 +421,7 @@ def export_blob(
         "goal_tol_vel": cfg.goal_tol_vel,
         "label": label,
     }
-    if weight_count(fields) * (2 if dtype == "f16" else 4) != len(payload):
+    if weight_bytes(fields) != len(payload):
         raise ValueError(
             "actor tensors do not match the SimBa layout"
         )  # pragma: no cover
@@ -350,7 +436,7 @@ class InferenceCost:
 
     params: int
     macs: int
-    weight_bytes_f32: int
+    weight_ram_bytes: int
     fits_internal: bool
     est_us: float
     dt_us: float
@@ -363,9 +449,13 @@ class InferenceCost:
 
 # ESP32-S3 rules of thumb: ~200 KB of internal SRAM left for weights next to
 # Wi-Fi; ~3 CPU cycles per float32 MAC at 240 MHz from internal SRAM; weights in
-# PSRAM are streamed every inference at ~40 MB/s (memory bound).
+# PSRAM are streamed every inference at ~40 MB/s (memory bound). The int8 inner
+# loop is 20 instructions per 4 MACs against float32's 12 (l8ui + sext + float.s
+# per weight); measured on the chip, the h48x2 student takes 1.1 ms in int8
+# against 0.77 ms in float32, the same ratio as 5 to 3 cycles per MAC.
 INTERNAL_WEIGHT_BUDGET = 200 * 1024
 CYCLES_PER_MAC = 3.0
+CYCLES_PER_MAC_I8 = 5.0
 CPU_HZ = 240e6
 PSRAM_BYTES_PER_S = 40e6
 
@@ -376,8 +466,11 @@ def inference_cost(h: dict[str, Any]) -> InferenceCost:
     E = H * int(h["expand"])
     params = weight_count(h)
     macs = H * D + int(h["n_blocks"]) * 2 * H * E + H
-    nbytes = params * 4  # decoded to float32 on the device whatever the file dtype
+    nbytes = weight_ram_bytes(
+        h
+    )  # f32/f16 decode to float32 on the device; int8 stays int8
     fits = nbytes <= INTERNAL_WEIGHT_BUDGET
-    compute_us = macs * CYCLES_PER_MAC / CPU_HZ * 1e6
+    cycles = CYCLES_PER_MAC_I8 if h.get("dtype") == DTYPE_I8 else CYCLES_PER_MAC
+    compute_us = macs * cycles / CPU_HZ * 1e6
     est = compute_us if fits else max(compute_us, nbytes / PSRAM_BYTES_PER_S * 1e6)
     return InferenceCost(params, macs, nbytes, fits, est, float(h["dt"]) * 1e6)

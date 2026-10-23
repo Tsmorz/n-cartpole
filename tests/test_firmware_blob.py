@@ -201,5 +201,5 @@ def test_inference_cost_estimate(rig_ckpt: Path) -> None:
     assert small.budget_fraction < 0.1
     big = fb.inference_cost(dict(h, hidden=256))
     assert not big.fits_internal
-    assert big.est_us == pytest.approx(big.weight_bytes_f32 / 40e6 * 1e6)
+    assert big.est_us == pytest.approx(big.weight_ram_bytes / 40e6 * 1e6)
     assert big.budget_fraction > 1.0

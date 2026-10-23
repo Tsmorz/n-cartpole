@@ -1,8 +1,9 @@
 /* model_store.h — the .ncpm blob in the `model` flash partition (data, subtype 0x40).
  *
  * Loading validates the blob (header + CRC over the memory-mapped partition) and
- * decodes the weights into float32 RAM: internal RAM when they fit with ~64 KB to
- * spare, else PSRAM. The policy scratch is always internal. The mapping stays open
+ * loads the weights into RAM (f32/f16 decoded to float32, int8 kept as stored):
+ * internal RAM when they fit with INTERNAL_SPARE to spare, else PSRAM. The policy
+ * scratch is always internal. The mapping stays open
  * so GET /api/model reads through the cache (no flash access that would stall
  * core 1). Everything here runs on core 0 (main, httpd). */
 #pragma once
@@ -18,7 +19,7 @@
 typedef struct {
     ncp_header_t hdr;
     ncp_model_t m;
-    float *weights;   /* ncp_weight_count floats */
+    void *weights;    /* ncp_weight_ram_bytes: float32, or the int8 image (ncp_model.h) */
     float *scratch;   /* ncp_policy_scratch_floats floats, internal RAM */
     size_t n_weights;
     bool in_psram;
