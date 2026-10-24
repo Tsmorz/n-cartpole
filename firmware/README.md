@@ -51,6 +51,12 @@ N16R8). **Framework:** ESP-IDF v5.3.1.
 Releases: `task fw-release -- fw-v0.2.0` tags and pushes; `.github/workflows/firmware.yml`
 builds and attaches the OTA image, the factory image and `SHA256SUMS`. Develop the
 dashboard without hardware against `task fw-mock`.
+`task fw-publish` runs the dashboard tests and copies `firmware/web/` into the personal site's
+`controls/swingup/real/dashboard/` (commit and push there). On the site the
+page shows a Device box (or takes `?device=<host>`) and reads the device's info, status,
+events, model and WebSocket from it, read-only: the device refuses cross-origin commands and
+uploads. Browsers block an https page from reaching a plain-http device, so it works for
+`localhost` (e.g. `task fw-mock`) or after allowing insecure content for the site.
 
 The dashboard has four tabs (URL hash `#live`, `#health`, `#record`, `#settings`; the last one
 is remembered): **Live** (scene, controller, calibration, state readout: estimate / encoder

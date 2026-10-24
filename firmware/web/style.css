@@ -326,6 +326,19 @@ main::before {
 .run-last { font-family: var(--mono); font-size: .68rem; color: var(--bad); opacity: .8; min-height: 0; }
 .run-last:empty { display: none; }
 
+/* Remote device: the bar on a copy of the page served from somewhere other than the device. */
+.device-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .4rem 1rem;
+  font-family: var(--mono); font-size: .74rem; color: var(--text-muted); border-bottom: 1px solid var(--border);
+}
+.device-bar[hidden] { display: none; }
+.device-bar input {
+  flex: 0 1 16rem; min-width: 8rem; padding: .15rem .45rem; font: inherit; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border-strong); border-radius: 3px;
+}
+.device-bar .banner-btn { margin-left: 0; border-color: var(--border-strong); }
+.device-bar .device-note { flex: 1 1 18rem; }
+
 /* Stale: the connection dropped or the device went quiet. Live values fade; a banner says since when. */
 .stale-banner {
   position: sticky; top: 0; z-index: 30; display: flex; align-items: center; justify-content: center; gap: .5rem;

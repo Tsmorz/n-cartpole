@@ -65,6 +65,13 @@
     </nav>
   </header>
 
+  <form class="device-bar" id="device-bar" hidden>
+    <label for="device-input">Device</label>
+    <input id="device-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="cartpole.local or 192.168.1.50">
+    <button class="banner-btn" type="submit">Connect</button>
+    <button class="banner-btn" type="button" id="device-forget" hidden>Forget</button>
+    <span class="device-note" id="device-note"></span>
+  </form>
   <div class="stale-banner" id="stale-banner" role="status" aria-live="polite" hidden><span class="dot"></span><span id="stale-text">Connection lost: the values below are frozen.</span><button class="banner-btn" type="button" onclick="location.reload()">Reload</button></div>
 
   <main id="main">
