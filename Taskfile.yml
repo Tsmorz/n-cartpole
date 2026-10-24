@@ -136,7 +136,7 @@ tasks:
       - git tag {{.CLI_ARGS}} && git push origin {{.CLI_ARGS}}
 
   fw-installer:
-    desc: "Write a firmware release's browser-installer files into ../personal-site/swingup/real/ (page: /swingup/real/); args: task fw-installer -- fw-v0.1.0"
+    desc: "Write a firmware release's browser-installer files into ../personal-site/controls/swingup/real/ (page: /controls/swingup/real/); args: task fw-installer -- fw-v0.1.0 [--model <.ncpm>]"
     cmds:
       - uv run python firmware/tools/web_install.py {{.CLI_ARGS}}
 
