@@ -341,13 +341,27 @@
     });
   })();
 
+  /* ---- Remote device ----
+     Served by the device, the page talks to its own origin. Served from elsewhere (the personal
+     site), ?device=<host[:port]> or the box in the bar below the header points it at a device.
+     Only the read-only GETs are cross-origin (web.c); commands and uploads are refused there. */
+  var DEVICE = (function () {
+    var v = null;
+    try { v = new URLSearchParams(location.search).get('device'); } catch (e) {}
+    if (v == null) { try { v = localStorage.getItem('device'); } catch (e) {} }
+    v = (v || '').trim().replace(/^[a-z]+:\/\//i, '').replace(/\/.*$/, '');
+    return /^[A-Za-z0-9.-]+(:\d{1,5})?$/.test(v) ? v : '';
+  })();
+  function devURL(url) { return DEVICE && !/^[a-z][a-z0-9+.-]*:/i.test(url) ? 'http://' + DEVICE + '/' + url.replace(/^\//, '') : url; }
+  function devIsLocal() { return /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:|$)/.test(DEVICE); }
+
   /* ---- HTTP helpers ---- */
   function fetchJSON(url, opts, timeoutMs) {
     opts = opts || {};
     var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null, timer = null;
     if (ctl) { opts.signal = ctl.signal; timer = setTimeout(function () { ctl.abort(); }, timeoutMs || 5000); }
     opts.cache = 'no-store';
-    return fetch(url, opts).then(function (r) {
+    return fetch(devURL(url), opts).then(function (r) {
       return r.text().then(function (t) {
         var j = null;
         try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
@@ -447,7 +461,7 @@
     if (S.conn !== 'rebooting') setConn(S.everLive ? 'reconnecting' : 'connecting');
     var sock;
     try {
-      sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+      sock = new WebSocket(DEVICE ? 'ws://' + DEVICE + '/ws' : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
     } catch (e) { scheduleReconnect(); return; }
     ws = sock;
     sock.binaryType = 'arraybuffer';
@@ -558,7 +572,7 @@
     S.model = { state: 'loading', got: 0, total: size || 0, crc: crc, error: '' };
     S.policy = null;
     renderModel();
-    fetch('api/model', { cache: 'no-store' }).then(function (r) {
+    fetch(devURL('api/model'), { cache: 'no-store' }).then(function (r) {
       if (r.status === 404) { S.model.state = 'none'; return null; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       S.model.total = +r.headers.get('Content-Length') || S.model.total;
@@ -743,6 +757,7 @@
   function renderModel() {
     var m = get(S.info, 'model', null), h = S.hdr, st = S.model.state;
     $('model-dl').hidden = !m;
+    $('model-dl').href = devURL('api/model');   // from the site (?device=), the blob lives on the device, not next to this page
     var why = get(S.info, 'model_error', '');
     if (!m && st !== 'loading') {
       kv('model-kv', [['model', 'none stored', 'bad'], why ? ['rejected', why, 'bad', 'The stored blob failed validation at boot'] : null,
@@ -1935,7 +1950,7 @@
     var bar = $('up-bar'), pct = $('up-pct'), row = $('up-progress');
     row.hidden = false;
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', p.kind === 'firmware' ? 'api/ota' : 'api/model');
+    xhr.open('POST', devURL(p.kind === 'firmware' ? 'api/ota' : 'api/model'));
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = function (e) {
       if (!e.lengthComputable) return;
@@ -2216,7 +2231,7 @@
     if (e) send({ excite: e }).then(function () { flash('rec-msg', 'Excitation on, not recording.', 'good'); }).catch(function (er) { flash('rec-msg', er.message, 'bad'); });
   });
   $('rec-dl').addEventListener('click', function () {
-    fetch('api/record', { cache: 'no-store' }).then(function (r) {
+    fetch(devURL('api/record'), { cache: 'no-store' }).then(function (r) {
       if (!r.ok) return r.json().catch(function () { return {}; }).then(function (j) { throw new Error(j.error || 'HTTP ' + r.status); });
       var cd = r.headers.get('Content-Disposition') || '', m = /filename="?([^";]+)"?/.exec(cd);
       return r.blob().then(function (b) { return { blob: b, name: m ? m[1] : null }; });
@@ -2279,6 +2294,27 @@
     if (!t) { try { stored = localStorage.getItem('tab'); } catch (e) {} }
     S.tabAuto = !t && TABS.indexOf(stored) < 0;
     showTab(t || (TABS.indexOf(stored) >= 0 ? stored : 'live'));
+  })();
+
+  /* ---- Remote device bar ---- */
+  (function () {
+    var bar = $('device-bar');
+    if (!bar || !(DEVICE || location.protocol === 'https:')) return; // the device itself serves http
+    bar.hidden = false;
+    $('device-input').value = DEVICE;
+    $('device-forget').hidden = !DEVICE;
+    var note = !DEVICE ? 'This page is not on a device: enter its address to watch it live.'
+      : devIsLocal() || location.protocol !== 'https:' ? 'Read-only: commands and uploads are refused unless the page is served by the device.'
+      : 'Browsers block an https page from reaching http://' + DEVICE + '. Allow insecure content for this site (padlock → Site settings), or open the page from the device.';
+    setText('device-note', note);
+    function go(v) {
+      try { if (v) localStorage.setItem('device', v); else localStorage.removeItem('device'); } catch (e) {}
+      var u = new URL(location.href);
+      u.searchParams.delete('device');
+      location.href = u.toString();
+    }
+    bar.addEventListener('submit', function (ev) { ev.preventDefault(); go($('device-input').value.trim()); });
+    $('device-forget').addEventListener('click', function () { $('device-input').value = ''; go(''); });
   })();
 
   /* ---- Boot ---- */

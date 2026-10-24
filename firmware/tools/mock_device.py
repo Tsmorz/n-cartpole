@@ -1403,6 +1403,9 @@ class Device:
 
 
 # ---- HTTP -------------------------------------------------------------------
+# The read-only GETs web.c answers with Access-Control-Allow-Origin: * (a dashboard served
+# from another origin, e.g. the personal site, reads these; POSTs stay same-origin only).
+CORS_GET = ("/api/info", "/api/status", "/api/events", "/api/model")
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -1448,6 +1451,8 @@ def make_handler(dev: Device) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
+            if self.command == "GET" and self.path.split("?")[0] in CORS_GET:
+                self.send_header("Access-Control-Allow-Origin", "*")  # as web.c does
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)

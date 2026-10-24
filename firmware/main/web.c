@@ -440,6 +440,7 @@ static esp_err_t model_get(httpd_req_t *req) {
     const uint8_t *blob = model_store_mapped(&len);
     httpd_resp_set_type(req, "application/octet-stream");
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"model.ncpm\"");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*"); /* read-only, like info/status/events */
     if (blob != NULL) {
         for (size_t off = 0; off < len; off += IO_BUF) {
             size_t n = len - off < IO_BUF ? len - off : IO_BUF;

@@ -337,6 +337,36 @@ def test_every_tab_renders(sim: Mock, browser: Any, width: int) -> None:
     assert not errors, errors
 
 
+def test_page_served_elsewhere_reads_a_device(sim: Mock, browser: Any) -> None:
+    """firmware/web/ from another origin (the personal site) + ?device= reads the device over CORS."""
+    import functools
+    import http.server
+    import threading
+
+    handler = functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(REPO / "firmware" / "web")
+    )
+    handler.log_message = lambda *a, **k: None  # type: ignore[attr-defined]
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        site = f"http://127.0.0.1:{srv.server_address[1]}/"
+        page, errors = _open(browser, f"{site}?device=127.0.0.1:{sim.port}#live")
+        assert page.locator("#device-bar").is_visible()
+        assert page.input_value("#device-input") == f"127.0.0.1:{sim.port}"
+        page.wait_for_function(
+            "(document.querySelector('#model-label')?.textContent ?? '—') !== '—'",
+            timeout=15000,
+        )
+        assert "Read-only" in _text(page, "#device-note")
+        page.close()
+        # CORS on a page that is not the device is the only thing under test: the favicon
+        # request to the static server 404s, which Chromium logs as a console error.
+        assert not [e for e in errors if "favicon" not in e and "404" not in e], errors
+    finally:
+        srv.shutdown()
+
+
 def test_arm_from_record_tab_and_disarm_from_header(sim: Mock, browser: Any) -> None:
     """Record's Arm arms; the header chip disarms."""
     _calm(sim)

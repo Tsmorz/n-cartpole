@@ -368,6 +368,10 @@ answers AAAA as well as A; without it macOS waits out a 5 s timeout for the AAAA
 - **Releases:** `task fw-release -- fw-v0.2.0` tags and pushes; the `firmware` workflow
   builds with ESP-IDF v5.3.1 and attaches `n-cartpole-fw-<ver>.bin` (OTA),
   `n-cartpole-fw-<ver>-factory.bin` (USB, offset 0x0) and `SHA256SUMS` to the release.
+- **Dashboard snapshot:** `task fw-publish` copies `firmware/web/` to the personal site
+  (`controls/swingup/real/dashboard/`) after the dashboard and API-schema tests pass.
+  Served from another origin the page reads a device named by `?device=` read-only; `GET`
+  `/api/info`, `/status`, `/events` and `/model` send `Access-Control-Allow-Origin: *`, POSTs do not.
 
 ## Partition table (16 MB)
 
