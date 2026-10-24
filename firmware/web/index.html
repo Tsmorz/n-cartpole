@@ -56,7 +56,7 @@
         <button class="chip chip-run" id="run-chip" type="button" data-run="" title="Controller state. Esc disarms from any tab."><span class="dot"></span><span id="run-chip-text">—</span></button>
         <span class="chip chip-rec" id="rec-chip" hidden title="Recording for system identification"><span class="dot"></span>REC <b id="rec-chip-t">0.0 s</b></span>
         <span class="chip chip-backend" id="backend" data-backend="" title="Plant backend">—</span>
-        <a class="chip chip-hide-md chip-model" id="model-chip" href="#settings" title="Model on the device (details in Settings)">model <b id="model-label">—</b></a>
+        <a class="chip chip-hide-md chip-model" id="model-chip" href="#settings" data-proofer-ignore title="Model on the device (details in Settings)">model <b id="model-label">—</b></a>
       </div>
       <button class="theme-toggle" type="button" role="switch" aria-label="Dark mode" title="Toggle color theme">
         <span class="tt-opt tt-light"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5.4"/><path d="M12 2.5v1.5M12 21.5V20M2.5 12H4M21.5 12H20M5.3 5.3l1.1 1.1M18.7 5.3l-1.1 1.1M5.3 18.7l1.1-1.1M18.7 18.7l-1.1-1.1"/></svg></span>
@@ -345,7 +345,7 @@
                 </div>
               </section>
               <section class="card" id="card-model" aria-labelledby="h-model">
-                <div class="card-head"><span class="card-label">.ncpm</span><h3 id="h-model">Model</h3><a class="tag" id="model-dl" href="api/model" download hidden>download</a></div>
+                <div class="card-head"><span class="card-label">.ncpm</span><h3 id="h-model">Model</h3><a class="tag" id="model-dl" href="api/model" data-proofer-ignore download hidden>download</a></div>
                 <dl class="kv" id="model-kv"><dt>model</dt><dd>—</dd></dl>
                 <p class="check-line" id="model-check"></p>
               </section>

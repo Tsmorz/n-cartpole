@@ -757,6 +757,7 @@
   function renderModel() {
     var m = get(S.info, 'model', null), h = S.hdr, st = S.model.state;
     $('model-dl').hidden = !m;
+    $('model-dl').href = devURL('api/model');   // from the site (?device=), the blob lives on the device, not next to this page
     var why = get(S.info, 'model_error', '');
     if (!m && st !== 'loading') {
       kv('model-kv', [['model', 'none stored', 'bad'], why ? ['rejected', why, 'bad', 'The stored blob failed validation at boot'] : null,
