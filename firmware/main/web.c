@@ -524,7 +524,7 @@ static esp_err_t model_post(httpd_req_t *req) {
         return send_error(req, "503 Service Unavailable", "control loop busy");
     }
     model_store_unload();
-    events_add(EV_INFO, "receiving model '%.48s' (%u bytes)", h.label, (unsigned)total);
+    events_add(EV_INFO, "receiving model, %u bytes: %.36s", (unsigned)total, h.label);
 
     model_store_write_begin();
     esp_err_t err = model_store_write(0, buf, NCP_HEADER_SIZE);
@@ -553,6 +553,9 @@ static esp_err_t model_post(httpd_req_t *req) {
     if (m == NULL) {
         events_add(EV_ERROR, "model upload failed: %s", why);
         return send_error(req, "400 Bad Request", why);
+    }
+    if (m->in_psram) { /* internal RAM is fragmented by now; at boot the model loads first */
+        events_add(EV_WARN, "weights in PSRAM (~3x slower): reboot to load them internal");
     }
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "ok", true);

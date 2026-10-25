@@ -1384,10 +1384,14 @@ class Device:
         h = validate_blob(blob)
         if h["n_links"] != self.n:
             raise ValueError(f"model has {h['n_links']} links, the plant {self.n}")
-        self.event("info", f"receiving model '{h['label'][:48]}' ({len(blob)} bytes)")
+        self.event("info", f"receiving model, {len(blob)} bytes: {h['label'][:36]}")
         self.write_flash(len(blob))
         self.blob, self.blob_hdr = blob, h
         self.event("info", f"model: {h['label']}")
+        if weight_ram_bytes(h) > 256 * 1024:
+            self.event(
+                "warn", "weights in PSRAM (~3x slower): reboot to load them internal"
+            )
         self.args.no_model = False
         if h["obs_dim"] == self.bundle.obs_dim:
             self.policy = blob_policy(blob, h)

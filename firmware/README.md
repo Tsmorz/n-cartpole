@@ -160,8 +160,11 @@ on behalf of core 1). Details: [docs/design.md](docs/design.md#cores-and-tasks).
   `application/octet-stream` for uploads) and no foreign `Origin` header.
 - **Encoder trouble:** Health → Sensors & drive: a magnet too far or too close, CORDIC overflow,
   and bad reads that keep rising.
-- **`budget_ok: false`:** the network is too large for the period; use a smaller
-  hidden size (the status shows policy/estimator µs per tick).
+- **`budget_ok: false`:** first check `weights_in` in `/api/info`. A model uploaded
+  without a reboot can land in PSRAM (internal RAM is fragmented by then), which makes
+  the policy ~3x slower; reboot and it loads internal again. If it is already
+  `internal`, the network is too large for the period; use a smaller hidden size or
+  `--dtype i8` (the status shows policy/estimator µs per tick).
 - **Boot loop after an update:** the bootloader rolls back to the previous slot after a
   crash before the image was marked valid; reflash the factory image over USB if both
   slots are bad.

@@ -53,7 +53,7 @@ void heap_watch_poll(void) {
         if (esp_timer_get_time() < BASELINE_US) {
             return;
         }
-        events_add(EV_INFO, "internal RAM after start: %u KB free, low %u KB, largest block %u KB",
+        events_add(EV_INFO, "internal RAM after start: %u KB free, low %u KB, largest %u KB",
                    (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                    (unsigned)(low / 1024),
                    (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024));
