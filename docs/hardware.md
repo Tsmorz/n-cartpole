@@ -10,8 +10,8 @@ datasheets before buying.
 
 | item | state |
 |---|---|
-| Design choice (link length / tips / drive) | **pending** — three candidates under RL swing-up verification (see below) |
-| Sensing (encoder noise, velocity estimate) | **firmware should run a model-based EKF** on the encoder readings (6-state, 200 Hz; fine for an ESP32-S3) and feed the policy its velocity estimates; unmodelled-acceleration setting ~0.5 rad/s^2 tested best. | angle noise ≤ 0.5 mrad. **Total added lag must stay ≤ ~20 ms** (user constraint): the 10 ms action delay uses half, so any velocity filtering may add ≤ ~10 ms (EMA α ≤ 0.5), or use a model-based observer instead — see "Findings" |
+| Design choice (link length / tips / drive) | **links: keep ref** (0.25 m, tips 0.08 / 0.05 kg; every trained policy uses it). **Drive: pick the motor first**, then the pulley that meets the drive requirements; both candidate drives work in sim (2026-10-25 study below) |
+| Sensing (encoder noise, velocity estimate) | **firmware should run a model-based EKF** on the encoder readings (6-state, 200 Hz; fine for an ESP32-S3) and feed the policy its velocity estimates; unmodelled-acceleration setting ~0.5 rad/s^2 tested best. | angle noise ≤ 0.5 mrad. **Total added lag must stay ≤ ~20 ms** (user constraint): the 5 ms action delay (1 step at 200 Hz) uses a quarter, so any velocity filtering may add ≤ ~15 ms; the EKF adds no filter lag — see "Findings" |
 | Loop rate | **200 Hz** (user decision, 2026-10-16), 1 control-step (5 ms) action delay assumed; velocity noise from differencing doubles vs 100 Hz, so the noise stage of the training curriculum matters |
 | Joint-1 cabling | **decided: slip ring** (user, 2026-10-01) |
 | Nothing ordered yet | — |
@@ -29,11 +29,35 @@ datasheets before buying.
 | Peak belt force (derated 0.65) | 15.4 N | 15.3 N | 15.3 N |
 | No-load cart speed | 2.7 m/s | 4.0 m/s | 4.0 m/s |
 | Swing-up after 150k RL steps, full-realism plant (reached upright / held 5 s, 20 seeds) | 4 / 0 | 4 / 0 | 4 / 0 |
+| Fastest open-loop unstable mode UU / DU / UD (s⁻¹) | 10.4 / 7.5 / 7.9 | 13.0 / 9.6 / 10.3 | 11.7 / 8.5 / 8.9 |
+| Swing-up work headroom (F · rail / energy range) | 11.1 | 17.3 | 16.9 |
+| LQR hold force, full env (UU / UD / DU RMS, 6/6 held each) | 1.53 / 0.75 / 1.21 N | 1.33 / 0.64 / 1.02 N (40T) | ≈ 1.25 / 0.65 / 1.06 N (small motor, 40T) |
+| Motor implied at 24 V (Kv, Kt, current for peak torque) | ~167 rpm/V, 57 mN·m/A, 2.6 A | ~125 rpm/V, 76 mN·m/A, 3.9 A | same as short |
 
-**The three designs are not distinguishable yet:** with noise, rail friction, 300 N/s slew and
-actor smoothing all on, none of the 150k-step swing-up policies learned to swing up (they
-idle at the bottom). The earlier idealised run did. An ablation (smoothing off / weak /
-ideal sensing) is in progress to find which factor stalls learning; design choice waits on it.
+The 150k-step row is from 2026-10-01 and was caused by the gated smoothing penalty (found later),
+not by the designs. **2026-10-25 re-check** (current `rig.toml`: 200 Hz, ±0.50 m rail, EKF, delta mode):
+
+- **Link geometry barely matters for holding**: all 145 screened designs balance, and LQR hold
+  force across the shortlist varies only ~1.2–1.5 N RMS in UU. Shorter links have faster unstable
+  modes (short: 13.0 s⁻¹ vs ref 10.4), which is harder with a 5 ms delay and a 1.5 N/step slew
+  limit. Every trained policy (the deployed h48 student: 90 % of transitions at full realism)
+  is on the ref links, so changing them means retraining for little gain. **Keep ref links.**
+- **The speed limit is not what limits the deployed policy**: same student, same seeds, 20 trials
+  per pair, full realism, only `v_noload` changed: 2.66 m/s (as trained) 89.7 %, 3.99 m/s
+  (mid-drive speed) 88.4 %, no limit at all 89.7 %. Back-EMF cuts the force on 1.3 % of steps
+  (−2.0 N when it does); the force limit binds on 0.3 %. The failures are transitions into DU,
+  a policy weakness, not drive capability. The sim's force–speed line (full force at stall to 0 at
+  no-load) is also pessimistic for a current-limited FOC drive, whose torque stays flat until
+  the voltage limit.
+- **So the drive is a sourcing choice.** Either candidate drive works; what must hold is
+  `M_eff = 0.55 + J/r² ≲ 0.92 kg`, belt force after derating ≥ ~15 N, and `v_noload` ≥ ~2.7 m/s.
+  The 40T + 0.3 N·m option has 20 % less effective mass and more speed margin but needs twice the
+  torque. Low-Kv gimbal motors (e.g. GM4108, ~540 rpm no-load at 20 V, ~0.15 N·m) fail the speed
+  requirement badly (< 1 m/s on a 40T pulley). A 45 mm-class 24 V BLDC datasheet (maxon EC 45 flat:
+  181 g·cm² = 1.8e-5 kg·m²) confirms the assumed rotor inertia range is realistic.
+- **Next step**: choose a real motor + FOC driver, put its datasheet J / torque / no-load rpm and
+  your pulley into `[physics.drive]`, and fine-tune the student's teacher on that plant
+  (`train.py --resume <ckpt> --config <rig with your drive>`) before distilling again.
 
 Bar stock is the same for all: 6061-T6 aluminium flat bar **25 × 3 mm**.
 
@@ -47,7 +71,7 @@ Bar stock is the same for all: 6061-T6 aluminium flat bar **25 × 3 mm**.
 | Peak belt force | ≈ 15 N available after derating | swing-up energy; transitions |
 | Cart speed capability | torque must still be available at ~2–2.5 m/s (peak cart speed seen in sim); candidates give 2.7–4.0 m/s no-load | back-EMF removes force near no-load speed |
 | Force slew | ≈ 300 N/s applied (1.5 N per 5 ms step) | the sim's actuator limit; the controller is trained against it. `--action-mode delta` makes the policy's own command obey it by construction |
-| Command-to-force latency | ≤ 10 ms total (1 control step) | the sim models exactly 1 step of delay |
+| Command-to-force latency | ≤ 5 ms total (1 control step at 200 Hz) | the sim models exactly 1 step of delay |
 | **Total loop lag budget** | ≤ ~20 ms = action delay (5 ms at 200 Hz) + any velocity-filter lag (≤ ~15 ms) | more than ~20 ms of lag is considered not controllable on this plant; an EMA with coefficient α adds ≈ α/(1−α) × one control period of lag (at 200 Hz: α = 0.5 → 5 ms, α = 0.8 → 20 ms) |
 | Joint-angle encoders | ≥ 14-bit (≥ 16384 counts/rev), **noise ≤ ≈ 0.5 mrad RMS** | at 1.5 mrad the unfiltered UU hold starts failing (2/5); effort scales ~linearly with noise |
 | Cart position resolution | ≤ 20 µm (≥ 4000 counts/rev at the pulley) | sim assumes 10 µm on a 20T pulley; 20 µm on a 40T |
@@ -65,7 +89,7 @@ Quantities are for **one rig**. "Depends" marks lines that change with the desig
 | 2 | Rail mounting frame | ~1.4 m aluminium extrusion (e.g. 2020/2040) or flat stiff base, M3/M4 hardware | 1 | 25–50 | rail must be level and straight; stiffness matters |
 | 3 | BLDC motor | frameless/servo-style ~42 mm BLDC with **rotor inertia ≤ 3e-5 kg·m²**, peak torque ≥ 0.15 N·m (ref) or ≥ 0.3 N·m (short/mid), ≥ 3000–4000 rpm at 24 V | 1 | 30–80 | **Depends** on candidate. Avoid steppers (rotor inertia too high, bad speed-torque) |
 | 4 | Motor encoder | ≥ 4000 counts/rev (quadrature) on the motor shaft, or a separate linear encoder on the rail | 1 | 0–30 | many BLDC kits include one; resolution at the carriage = 2π r / counts |
-| 5 | FOC motor driver | torque/current-mode FOC, current-loop ≥ 5 kHz, peak current ≥ torque / Kt with margin, 24 V, accepts commands at 100 Hz with ≤ 2–3 ms latency (SPI/UART/CAN/PWM) | 1 | 25–150 | latency and slew behaviour are part of the sim; measure on a scope |
+| 5 | FOC motor driver | torque/current-mode FOC, current-loop ≥ 5 kHz, peak current ≥ torque / Kt with margin, 24 V, accepts commands at 200 Hz with ≤ 2–3 ms latency (SPI/UART/CAN/PWM) | 1 | 25–150 | latency and slew behaviour are part of the sim; measure on a scope |
 | 6 | GT2 belt | 6 mm wide, ≈ 2.6–2.8 m loop (≈ 2 × rail + wrap) | 1 | 10–20 | keep tensioned; backlash/compliance limit bandwidth |
 | 7 | GT2 drive pulley | **40T** (r = 12.7 mm, short/mid) or 20T (r = 6.35 mm, ref); bore to match motor shaft | 1 | 5–10 | **Depends**. Larger pulley ⇒ less reflected inertia, less belt force per torque |
 | 8 | GT2 idler pulley + mount | matching tooth count, bearing-supported, at the far end of the rail | 1 | 5–10 | |
@@ -76,7 +100,7 @@ Quantities are for **one rig**. "Depends" marks lines that change with the desig
 | 13 | Joint-angle encoders | **14-bit (or better) magnetic absolute encoder**, e.g. AS5048A/B class, with diametral magnet, SPI | 2 | 15–35 | noise ≤ 0.5 mrad is the requirement; mounting concentricity matters; verify noise on the bench |
 | 14 | Slip ring (**decided**), low-friction, ≥ 6 wires | carries power + SPI (SCLK, MISO, MOSI, CS) + GND to the joint-2 encoder on link 1; choose the lowest-friction, lowest-noise unit that fits the joint-1 shaft/bore, gold contacts | 1 | 15–40 | joint 1 rotates continuously; check starting/friction torque on the datasheet — it adds to joint-1 friction (see Risks) |
 | 15 | Tip weights / ballast | brass or steel masses + fasteners to make each tip assembly the design mass (0.05–0.08 kg) | as needed | 5–15 | tip mass **includes** bearing, clamp and encoder board — weigh the whole assembly |
-| 16 | Microcontroller | ESP32-S3 dev board (dual-core 240 MHz) | 1 | 10–20 | runs the 100 Hz loop + the small actor network |
+| 16 | Microcontroller | ESP32-S3 dev board (dual-core 240 MHz) | 1 | 10–20 | runs the 200 Hz loop + the distilled h48×2 actor (0.75 ms/inference measured) + EKF (0.45 ms) |
 | 17 | Power supply | 24 V, ≥ 5 A | 1 | 20–35 | |
 | 18 | Wiring / connectors / fuse | motor phase wire, encoder cable, 5–10 A fuse, connectors | 1 lot | 15–30 | |
 | 19 | Emergency stop | physical mushroom e-stop cutting motor power | 1 | 8–15 | **buy this** — a fast cart plus a spinning pendulum is dangerous |
@@ -100,7 +124,7 @@ included: 3D printing/machining, shipping, tools you already own.
 | Peak force and force-vs-speed | spring scale at stall; log force/current vs cart speed up to ~2.5 m/s |
 | Actuator latency and slew | scope on the command pin vs motor current / force |
 | Encoder noise and resolution | log both joint encoders and the cart position with everything at rest; compute RMS and step size |
-| Loop timing | toggle a pin each iteration; confirm 10 ms with low jitter |
+| Loop timing | toggle a pin each iteration; confirm 5 ms with low jitter (the dashboard's loop stats show exec time and misses) |
 
 Then update `config/rig.toml` (`[physics.drive]`, `[physics.links]`, `[hardware.sensors]`,
 `cart_coulomb`) with the measured values and re-train — the policy is trained on the
@@ -124,8 +148,9 @@ nominal model plus randomization, so the closer the nominal is to the truth, the
   result to rely on yet.
 - **Cart mass is mostly set by the motor**, via reflected rotor inertia — choose a
   low-inertia motor and a larger pulley. Link geometry only moves hold effort ~15–20 %.
-- **Loop rate**: 200 Hz does not help (velocity noise ∝ 1/dt); stay at 100 Hz unless
-  latency measurement says otherwise.
+- **Loop rate** (superseded): the early LQR screen found 200 Hz did not help with differenced
+  velocities (noise ∝ 1/dt); the user chose 200 Hz anyway (2026-10-16) and the EKF removes the
+  differencing noise, so the rig runs at 200 Hz.
 - **A quiet hold is bounded below** by rail friction (≈ 0.4 N) and encoder noise; expect
   roughly 0.4–1.5 N RMS during holds on real hardware, not ~0 N.
 - The old simulator (no delay, no sensors, no friction) gave "0 N holds"; the policy
@@ -150,13 +175,15 @@ nominal model plus randomization, so the closer the nominal is to the truth, the
    supply sag. Any of these can limit bandwidth.
 5. **Safety**: e-stop, hard end stops and a software force/position limit before first
    power-up; start with reduced force limits and the pendulum constrained.
-6. **Deployment** (firmware written, not yet built/flashed): `firmware/` — see
-   `firmware/README.md`. The C port is validated against the Python on the host; the first
-   ESP-IDF build happens in CI. Needs a student actor small enough for 200 Hz (≤ ~hidden 48–64),
-   and on-chip measurement of the double-precision EKF's cost (software floating point on the S3).
+6. **Deployment** (firmware built and running on an ESP32-S3 N16R8 with the sim backend, 2026-10-25):
+   `firmware/` — see `firmware/README.md`. The distilled h48×2 student runs at 0.75 ms per inference
+   with the weights in internal RAM and the single-precision EKF at 0.45 ms, ~1.3 ms of the 5 ms tick.
+   The rig backend (`task fw-build-rig`) compiles but has not run against hardware: encoders, drive
+   and e-stop are untested.
 
 ## Change log
 
+- 2026-10-25 — Design re-check on the current rig config. Design screen (145 designs, LQR, full-env holds): all balance, hold effort differs ≤ ~20 %. Speed-limit probe on the deployed h48 student (20 trials/pair, full realism, seed 100): v_noload 2.66 / 3.99 / unlimited → 89.7 / 88.4 / 89.7 % — the back-EMF limit is not binding. Decision basis: keep the ref links; the drive is chosen by motor availability against the drive requirements (see Candidate designs). Stale 100 Hz references and the deployment risk updated (firmware runs on the ESP32-S3; ~1.3 ms of the 5 ms tick).
 - 2026-10-22 — RL fine-tuning of the h48 student against the teacher's critics (`--actor-from`, lr 1e-4, 2.0M → 2.3M; one crash at 2.05M during a local firmware build, resumed) did not beat plain distillation: full realism, 20 trials/pair, seed 100: 87 % (2.1M) → 73 % (2.2M, UU collapsed to ~20 % while DU rose to 80–90 %) → 92 % (2.3M); re-checked on seed 300: fine-tuned 2.3M 88 % (15 rail exits) vs distilled student 92 % (4). Over both seeds: distilled 91 %, fine-tuned 90 %. **Deploy the distilled h48 student** (`dist/firmware/tqc-rail05-goals-ft-weighted-h48b2-v2_2000000.ncpm`). The oscillation between goals is the familiar fine-tuning instability; if DU needs work, add a behaviour-cloning anchor to the actor loss (stay near the teacher while improving).
 - 2026-10-22 — Deployable student found. Distillation recipe v2 (constant LR, last round cosine-annealed, 15k Adam steps/round, 8 DAgger rounds × 80k steps, 400k teacher-buffer observations): full realism, 20 trials per pair — **h48×2 90 %** (38,305 params, 150 KB f32, fits internal SRAM, est. 0.47 ms/inference on the S3 = 9 % of the period), h64×2 88 % (67k params, 270 KB: too big for internal SRAM). Teacher 92 %; the student keeps the teacher's profile (UU 85–100 %, into DU 65–70 %). In the C firmware core's closed-loop sim (nominal plant + encoder noise) the h48 blob succeeds 160/160. Exported as `dist/firmware/tqc-rail05-goals-ft-weighted-h48b2-v2_2000000.ncpm`. Started RL fine-tuning of the h48 student against the teacher's critics (`--actor-from`, lr 1e-4, 2.0M → 2.3M) to work on DU.
 - 2026-10-22 — Firmware + deployment tooling (user request). ESP32-S3 (N16R8) firmware under `firmware/`: control loop alone on core 1 (own gptimer ISR), Wi-Fi/httpd/telemetry on core 0; sim and rig backends (2 × AS5048A SPI, PCNT cart encoder, PWM/DIR/EN drive behind an interface since the FOC driver is not chosen); dashboard in the personal site's style with the live network diagram, goal buttons + Random, cart slider (x_ref), task/core table; OTA (two slots + rollback) and model upload by drag and drop; GitHub release on `fw-v*` tags. Recordings (`.ncpr`, 200 Hz, excitation presets: ring-down, chirp, PRBS, steps) + offline sysid (`task sysid`) → fitted config → `train.py --resume --config`. C core parity vs Python: policy 2.4e-5 N, dynamics 1e-9, EKF 1e-8, controller obs 8e-7 / command 1.2e-5 N; C closed loop with the 2M policy (nominal plant + encoder noise) 159/160. The 2M actor (1.06M params) does not fit 200 Hz on the S3 → distillation: first students at full realism (20 trials) h64×2 76 %, h32×2 64 %, h64×1 56 % (teacher 92 %); a longer constant-LR recipe and RL fine-tuning of the student against the teacher's critics (`--actor-from`) are next. Velocity estimator swap on the 2M policy (zero-shot, full realism): EKF 92 % / 0.52 N per-step force change, differencing 93 % / 1.09 N, EMA 0.3 94 % / 0.96 N — the EKF halves the jitter; DU was better with differencing (80–90 % vs 65–70 %), possibly EKF model error under randomization.
