@@ -357,7 +357,7 @@ static void watch(const ctrl_status_t *st, const model_strs_t *ms) {
     } else if (budget_state != budget_logged && t_now - budget_since >= 10 * 1000000LL) {
         budget_logged = budget_state;
         events_add(budget_state ? EV_INFO : EV_WARN,
-                   "loop budget %s for 10 s: exec avg %lu us, max %lu us, period %lu us",
+                   "loop budget %s for 10 s: avg %lu, max %lu, period %lu us",
                    budget_state ? "ok" : "exceeded", (unsigned long)st->exec_avg_us,
                    (unsigned long)st->exec_max_us, (unsigned long)st->nominal_period_us);
     }

@@ -329,9 +329,10 @@ WebSocket clients, a page load and a model download:
 | + Wi-Fi pools trimmed, int8 | 180.2 KB | 164.7 KB | 74 KB | 1.09-1.13 ms |
 
 The largest free block stays small with f32 weights: internal RAM is fragmented, which is why
-`model_store.c` keeps the weights buffer. Swapping from an int8 model to an f32 one without a
-reboot therefore lands the f32 weights in PSRAM (the kept 44 KB buffer is too small and no
-150 KB block is left); a reboot loads them internal again.
+`model_store.c` keeps the weights buffer. Uploading an f32 model without a reboot onto a board
+that booted with no model, or with an int8 one, therefore lands the f32 weights in PSRAM (no
+kept buffer, or a 44 KB one, and after Wi-Fi starts the largest free block is ~112 KB, short of
+150 KB + the 32 KB spare); the upload logs a warning and a reboot loads them internal again.
 
 **int8 weights** (`--dtype i8`) shrink the h48x2 student from 150 KB to 44 KB of RAM. In the
 Python simulation (`scripts/eval_quantized.py`, 20 trials per start x goal pair on the checkpoint's

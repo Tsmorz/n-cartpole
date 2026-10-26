@@ -1061,7 +1061,19 @@ class Device:
         """
         return self._last_loop.get("exec_avg_us", 0) <= 0.8 * self.p.dt * 1e6
 
-    _last_loop: dict[str, Any] = {}  # noqa: RUF012  (replaced, never mutated)
+    # Complete from the start: the firmware always reports every field, and a status read
+    # before the first control tick (a slow runner) must not come back with an empty object.
+    _NO_LOOP: dict[str, Any] = {  # noqa: RUF012  (replaced, never mutated)
+        "period_us": 0,
+        "exec_avg_us": 0,
+        "exec_max_us": 0,
+        "policy_avg_us": 0,
+        "est_avg_us": 0,
+        "misses": 0,
+        "rt_factor": 1.0,
+        "budget_ok": True,
+    }
+    _last_loop: dict[str, Any] = _NO_LOOP
 
     def status(self) -> dict[str, Any]:
         """Build the status JSON (design.md); timings cover the time since the last call."""
@@ -1352,7 +1364,7 @@ class Device:
                 0.0,
             )
             self.goal = self.labels.index("DD")
-            self._last_loop = {}
+            self._last_loop = self._NO_LOOP
             self._reset_plant("DD")
             self.boot_count += 1
             self.fault_count, self.last_fault = 0, ""
@@ -1384,10 +1396,14 @@ class Device:
         h = validate_blob(blob)
         if h["n_links"] != self.n:
             raise ValueError(f"model has {h['n_links']} links, the plant {self.n}")
-        self.event("info", f"receiving model '{h['label'][:48]}' ({len(blob)} bytes)")
+        self.event("info", f"receiving model, {len(blob)} bytes: {h['label'][:36]}")
         self.write_flash(len(blob))
         self.blob, self.blob_hdr = blob, h
         self.event("info", f"model: {h['label']}")
+        if weight_ram_bytes(h) > 256 * 1024:
+            self.event(
+                "warn", "weights in PSRAM (~3x slower): reboot to load them internal"
+            )
         self.args.no_model = False
         if h["obs_dim"] == self.bundle.obs_dim:
             self.policy = blob_policy(blob, h)
